@@ -21,6 +21,10 @@ from pathlib import Path
 BENCH_ROOT = Path(__file__).resolve().parent.parent
 TASKS_DIR = BENCH_ROOT / "tasks"
 SOLVED_DIR = BENCH_ROOT / "solved"
+LOGOS_DIR = BENCH_ROOT / "assets" / "logos"
+DEFAULT_REPO_URL = "https://github.com/SunHao-0/Vero"
+KERNEL_COMMIT_URL = ("https://git.kernel.org/pub/scm/linux/kernel/git/bpf/"
+                     "bpf-next.git/commit/?id=833ef4a954e1")
 
 # Files bundled on each problem page for borrowing. The checker is deliberately
 # excluded; a borrower needs the spec, the instruction, and a buildable project.
@@ -241,8 +245,8 @@ def page(title, body, depth, repo_url, active=""):
 <header class=topbar>
   <a href="{root}index.html" class=brand>Vero</a>
   <nav>
-    {nav('index.html', 'Problems', 'problems')}
-    {nav('about.html', 'About', 'about')}
+    {nav('index.html', 'About', 'about')}
+    {nav('problems.html', 'Problems', 'problems')}
     {repo_link}
   </nav>
 </header>
@@ -295,7 +299,7 @@ def render_index(tasks, repo_url):
   requirement with no existing implementation, so a correct solution improves
   the upstream system.</p>
   <p class=stat>{len(tasks)} problems ({esc(area_line)}). {solved} with a
-  published solution. <a href="about.html">About and results</a>.</p>
+  published solution. <a href="index.html">About and results</a>.</p>
 </section>
 """
 
@@ -330,53 +334,219 @@ def render_index(tasks, repo_url):
     return page("Vero: Problems", intro + controls + table, 0, repo_url, "problems")
 
 
+# How a task works: provided vs editable sections, then the check gates.
+ANATOMY_SVG = """
+<svg viewBox="0 0 860 150" role="img" aria-label="Task anatomy">
+  <defs><marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3"
+    orient="auto"><path d="M0,0 L6,3 L0,6 z" fill="#888"/></marker></defs>
+  <rect x="8" y="8" width="330" height="134" rx="8" fill="#fff" stroke="#ddd"/>
+  <text x="24" y="32" font-size="14" font-weight="700" fill="#111">Task.lean</text>
+  <rect x="24" y="44" width="298" height="40" rx="6" fill="#eef4ff" stroke="#cddffb"/>
+  <text x="36" y="61" font-size="11.5" font-weight="600" fill="#1a4fa0">Provided (hash-locked)</text>
+  <text x="36" y="76" font-size="11.5" fill="#334">DEFINITIONS &#183; SPEC &#183; THEOREM</text>
+  <rect x="24" y="92" width="298" height="40" rx="6" fill="#fffaf0" stroke="#f0dfb5"/>
+  <text x="36" y="109" font-size="11.5" font-weight="600" fill="#8a6d1a">Editable (your workspace)</text>
+  <text x="36" y="124" font-size="11.5" fill="#334">IMPLEMENTATION &#183; AUX &#183; PROOF</text>
+  <line x1="344" y1="75" x2="392" y2="75" stroke="#888" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="398" y="30" width="300" height="90" rx="8" fill="#fff" stroke="#ddd"/>
+  <text x="414" y="56" font-size="14" font-weight="700" fill="#111">check.sh &#8212; five gates</text>
+  <text x="414" y="78" font-size="11.5" fill="#334">integrity &#183; no stubs &#183; no cheats</text>
+  <text x="414" y="96" font-size="11.5" fill="#334">lake lean &#183; #print axioms</text>
+  <line x1="704" y1="75" x2="752" y2="75" stroke="#888" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="758" y="47" width="94" height="56" rx="8" fill="#eefaf0" stroke="#cbe9cf"/>
+  <text x="805" y="72" font-size="15" font-weight="700" fill="#1f7a37" text-anchor="middle">PASS</text>
+  <text x="805" y="90" font-size="10.5" fill="#1f7a37" text-anchor="middle">machine-checked</text>
+</svg>
+"""
+
+# Example lines are HTML (static local content, already safe).
+PRINCIPLES = [
+    ("Real-world",
+     "Every task comes from a production system, not a textbook exercise "
+     "or a programming contest.",
+     "The eBPF tasks are value-tracking operators of <strong>the kernel "
+     "verifier</strong>, which analyzes every BPF program before it runs."),
+    ("New specification",
+     "Each task encodes a requirement the upstream implementation does not "
+     "yet meet, distilled from upstream experience and community needs.",
+     "The eBPF tasks require operators that are <strong>provably sound and "
+     "optimal</strong>, a bar the verifier's current operators miss."),
+    ("Valuable to solve",
+     "A correct solution is an upstream contribution, not just a benchmark "
+     "score.",
+     "The tnum_step() solution is <strong>merged into</strong> the Linux "
+     "kernel."),
+]
+
+AREA_CARDS = [
+    ("eBPF", "ebpf.png",
+     "Sound and optimal abstract operators for the Linux kernel eBPF "
+     "verifier, over the cnum and interval domains."),
+    ("LLVM", "llvm.png",
+     "Optimal KnownBits and DemandedBits transfer functions, the forward "
+     "and backward bit-level analyses the optimizer relies on."),
+    ("seL4", "seL4.png",
+     "Verified optimizations of seL4 microkernel routines, specified "
+     "against the kernel's data-structure invariants."),
+]
+
+# (dir name, display name, area, highlight)
+PUBLISHED = [
+    ("eBPF_TnumStepUp", "tnum_step()", "eBPF",
+     "Provably sound and optimal; merged into the Linux kernel"),
+    ("LLVM_KBUmax", "KnownBits umax", "LLVM",
+     "Optimal transfer function for unsigned maximum"),
+    ("seL4_CteRevoke", "cteRevoke", "seL4",
+     "Verified revocation over the capability derivation tree"),
+]
+
+
+# --- Syntax highlighting (build time, no JS) ---------------------------------
+
+_HL_RULES = {
+    "lean": [
+        ("c", r"--[^\n]*|/-.*?-/"),
+        ("s", r'"(?:[^"\\]|\\.)*"'),
+        ("k", r"\b(def|theorem|let|by|intro|refine|unfold|simp|only|fun|"
+              r"if|then|else|match|with)\b|\bbv_decide\b|·|∀|∧|→"),
+        ("t", r"\b(BitVec|Prop|Bool|Nat)\b"),
+        ("n", r"\b\d+\b"),
+    ],
+    "c": [
+        ("c", r"//[^\n]*|/\*.*?\*/"),
+        ("s", r'"(?:[^"\\]|\\.)*"|<[a-z_/.]+\.h>'),
+        ("k", r"\b(if|else|return|struct|static|const|unsigned|long)\b|"
+              r"\b(u64|s64|u32|s32)\b|#include\b"),
+        ("n", r"\b(0[xX][0-9a-fA-F]+|\d+ULL|\d+)\b"),
+    ],
+}
+
+
+def hl(code: str, lang: str) -> str:
+    """Escape `code` and wrap tokens in <span class=tok-*> per _HL_RULES."""
+    master = re.compile(
+        "|".join(f"(?P<{n}>{p})" for n, p in _HL_RULES[lang]), re.S)
+    out, pos = [], 0
+    for m in master.finditer(code):
+        out.append(esc(code[pos:m.start()]))
+        out.append(f'<span class=tok-{m.lastgroup}>{esc(m.group(0))}</span>')
+        pos = m.end()
+    out.append(esc(code[pos:]))
+    return "".join(out)
+
+
+def merged_lean() -> str:
+    """Specification, algorithm, and proof of the kernel-merged solution,
+    reassembled from the published Task.lean."""
+    secs = {s: b for s, _, b in
+            sections_of(read(SOLVED_DIR / "TnumStepUp" / "Task.lean"))}
+    return (
+        "def tnumStepUp (tval tmask z : BitVec 64) : BitVec 64 :=\n"
+        + secs.get("IMPLEMENTATION", "").strip("\n") + "\n\n"
+        + secs.get("SPEC", "").strip("\n") + "\n"
+        + secs.get("PROOF", "").strip("\n"))
+
+
+def merged_c() -> str:
+    """The C form of the solution, from the doc comment onward."""
+    src = read(SOLVED_DIR / "TnumStepUp" / "tnum_step_c" / "tnum_step_up.c")
+    i = src.find("/*")
+    return src[i:].strip("\n") if i != -1 else src.strip("\n")
+
+
 def render_about(tasks, repo_url):
+    by_area = {}
+    for t in tasks:
+        by_area[t["area"]] = by_area.get(t["area"], 0) + 1
+
+    solved = sum(1 for t in tasks if t["solution"])
+
+    stats = "".join(
+        f'<div class=stat-tile><div class=stat-num>{esc(num)}</div>'
+        f'<div class=stat-label>{esc(label)}</div></div>'
+        for num, label in [
+            (str(len(tasks)), "tasks"),
+            ("3", "real systems"),
+            (str(solved), "solved & published"),
+            ("1", "merged into Linux"),
+        ])
+
+    principle_cards = "".join(
+        f'<div class=card><h3>{esc(title)}</h3><p>{esc(sent)}</p>'
+        f'<p class=ex>Example: {ex}</p></div>'
+        for title, sent, ex in PRINCIPLES)
+
+    area_cards = "".join(
+        f'<a class="card alink" href="problems.html?area={name}">'
+        f'<div class=arealogo>'
+        f'<img src="assets/logos/{logo}" alt="{esc(name)} logo">'
+        f'<span class=areacount>{by_area.get(name, 0)} tasks</span></div>'
+        f'<p>{esc(desc)}</p>'
+        f'<p class=browse>Browse {esc(name)} tasks &rarr;</p></a>'
+        for name, logo, desc in AREA_CARDS)
+
+    published_rows = "".join(
+        f'<tr><td><a href="problems/{d}.html">{esc(n)}</a></td>'
+        f'<td>{badge(a, "area-" + a)}</td><td>{esc(h)}</td></tr>'
+        for d, n, a, h in PUBLISHED)
+
     body = f"""
 <section class=prose>
 <h1>About</h1>
-<p>Vero evaluates coding agents on verified code generation. Given a formal
-specification, an agent must produce an implementation and a Lean 4 proof that
-the implementation satisfies it. A proof checker decides correctness, so the
-review burden shifts from reading code to validating a concise specification.</p>
+<p>Vero evaluates coding agents on verified code generation: given a formal
+specification, the agent must produce an implementation together with a Lean 4
+proof that the implementation satisfies it. The proof checker decides
+correctness, so reviewing a solution reduces to reading a concise
+specification.</p>
 
-<h2>Design principles</h2>
-<ul>
-<li><strong>Real-world.</strong> Every task originates from a production system,
-not a textbook exercise or a programming contest.</li>
-<li><strong>New specification.</strong> Each specification encodes a requirement
-for which no implementation exists in the system or in public sources.</li>
-<li><strong>Valuable to solve.</strong> A correct solution benefits the upstream
-system, for example by improving the soundness or precision of a critical
-component.</li>
-</ul>
+<div class=stats>{stats}</div>
 
-<h2>Areas</h2>
-<ul>
-<li><strong>eBPF.</strong> {esc(AREAS['eBPF'])}</li>
-<li><strong>LLVM.</strong> {esc(AREAS['LLVM'])}</li>
-<li><strong>seL4.</strong> {esc(AREAS['seL4'])}</li>
-</ul>
+<div class=figure>{ANATOMY_SVG}</div>
+
+<h2>Principles</h2>
+<div class=cards>{principle_cards}</div>
+
+<h2>Three areas, {len(tasks)} tasks</h2>
+<div class=cards>{area_cards}</div>
 
 <h2>Results</h2>
-<p>Claude Code solved 3 of the {len(tasks)} tasks, one in each area. Real-world
-verified code generation remains an open problem, and the unsolved tasks are
-concrete targets for future work.</p>
+<p>{len(PUBLISHED)} of the {len(tasks)} tasks are solved, one per area, each
+with a published solution:</p>
+<table class=results>
+<thead><tr><th>Solution</th><th>Area</th><th>Highlight</th></tr></thead>
+<tbody>{published_rows}</tbody>
+</table>
+
 <div class=callout>
-One solution found by an agent has been merged into the Linux kernel. It
-replaces a 20-line algorithm proposed by domain experts with a 4-line
-provably-correct alternative in the eBPF verifier.
+A full-suite run with <strong>Claude Opus 5</strong> is in progress and has
+already solved three more tasks. Complete results and solutions will be
+released soon.
+</div>
+
+<h3>In the Linux kernel</h3>
+<p>The agent-written <code>tnum_step()</code> is
+<a href="{KERNEL_COMMIT_URL}">merged into the Linux kernel</a>, and it is
+<strong>provably correct</strong>: the Lean 4 proof on the left machine-checks
+the soundness and optimality of the exact algorithm that the C code on the
+right implements.</p>
+<div class=duo>
+<div class=panel>
+  <div class=phead>Lean 4 &mdash; algorithm, specification, proof</div>
+  <pre class=code>{hl(merged_lean(), "lean")}</pre>
+  <div class=pfoot>Five obligations, each closed by a machine-checked proof.</div>
+</div>
+<div class=panel>
+  <div class=phead>C &mdash; as merged in <code>kernel/bpf/tnum.c</code></div>
+  <pre class=code>{hl(merged_c(), "c")}</pre>
+  <div class=pfoot><a href="{KERNEL_COMMIT_URL}">bpf-next commit 833ef4a954e1</a></div>
+</div>
 </div>
 
 <h2>Borrow a problem</h2>
-<p>Each problem page bundles its specification, instruction, and Lake project
-files for download. Open a problem, read the specification, and start from the
-editable sections.</p>
-
-<h2>Contribute</h2>
-<p>Contributions are welcome: a new task from a real system, an improvement to a
-specification, or a published solution to an open problem. A task is a Lean 4
-specification with provided and editable sections and a checker that enforces
-proof soundness and integrity.</p>
+<p>Every problem page bundles its specification, instruction, and Lake project
+files for download; start from the editable sections. Contributions are
+welcome: a new task from a real system, a sharper specification, or a solution
+to an open problem.</p>
 
 <h2>Authors</h2>
 <ul>
@@ -384,7 +554,8 @@ proof soundness and integrity.</p>
 <li>LLVM tasks: Cong Li</li>
 <li>seL4 tasks: Zenan Li</li>
 </ul>
-<p>Vero is described in our ASPLOS paper.</p>
+<p class=trademark>The eBPF, LLVM, and seL4 logos identify the upstream
+projects and are trademarks of their respective owners.</p>
 </section>
 """
     return page("Vero: About", body, 0, repo_url, "about")
@@ -457,7 +628,7 @@ def render_problem(t, repo_url):
     desc = f'<p class=desc>{esc(t["description"])}</p>' if t["description"] else ""
 
     body = f"""
-<p class=crumb><a href="../index.html">Problems</a> / {t['id']:03d}</p>
+<p class=crumb><a href="../problems.html">Problems</a> / {t['id']:03d}</p>
 <header class=probhead>
   <h1>{esc(t["title"])}</h1>
   <div class=badges>{''.join(badges)}</div>
@@ -526,8 +697,9 @@ def load_tasks():
 def main():
     ap = argparse.ArgumentParser(description="Build the Vero static site.")
     ap.add_argument("--out", default=str(BENCH_ROOT / "site"))
-    ap.add_argument("--repo-url", default="",
-                    help="Public repository URL for the GitHub link (optional).")
+    ap.add_argument("--repo-url", default=DEFAULT_REPO_URL,
+                    help="Repository URL for the GitHub link "
+                         f"(default: {DEFAULT_REPO_URL}).")
     args = ap.parse_args()
     out = Path(args.out)
 
@@ -540,11 +712,14 @@ def main():
 
     (out / "assets" / "style.css").write_text(STYLE)
     (out / "assets" / "app.js").write_text(APP_JS)
+    if LOGOS_DIR.exists():
+        shutil.copytree(LOGOS_DIR, out / "assets" / "logos")
 
     tasks = load_tasks()
 
-    (out / "index.html").write_text(render_index(tasks, args.repo_url))
-    (out / "about.html").write_text(render_about(tasks, args.repo_url))
+    # About is the landing page; the task board lives at problems.html.
+    (out / "index.html").write_text(render_about(tasks, args.repo_url))
+    (out / "problems.html").write_text(render_index(tasks, args.repo_url))
 
     for t in tasks:
         (out / "problems" / f"{t['name']}.html").write_text(
@@ -661,6 +836,52 @@ details summary { cursor: pointer; font-weight: 600; color: #333; padding: 6px 0
 
 .prose h1 { font-size: 24px; }
 .prose p, .prose li { color: #333; }
+.figure { margin: 20px 0; }
+.figure svg { max-width: 100%; height: auto; display: block; }
+
+.stats { display: flex; flex-wrap: wrap; margin: 18px -6px 6px; }
+.stat-tile { flex: 1 1 120px; margin: 6px; text-align: center;
+  border: 1px solid #e6e6e6; border-radius: 8px; padding: 12px 8px; background: #fafbfc; }
+.stat-num { font-size: 26px; font-weight: 700; color: #1a4fa0; line-height: 1.2; }
+.stat-label { font-size: 12px; color: #666; margin-top: 2px; }
+
+.cards { display: flex; flex-wrap: wrap; margin: 12px -6px; }
+.card { flex: 1 1 240px; margin: 6px; border: 1px solid #e6e6e6;
+  border-radius: 8px; padding: 12px 16px; background: #fafbfc; }
+.card h3 { margin: 2px 0 6px; font-size: 15px; }
+.card p { margin: 6px 0; font-size: 13.5px; }
+.card .ex { color: #667; font-size: 12.5px; }
+.arealogo { height: 44px; margin: 4px 0 8px; }
+.arealogo img { height: 44px; width: auto; max-width: 70%; }
+.areacount { float: right; font-size: 12px; font-weight: 600; color: #555;
+  background: #f2f2f2; border-radius: 999px; padding: 2px 10px; margin-top: 12px; }
+a.alink { color: inherit; }
+a.alink:hover { text-decoration: none; border-color: #1a4fa0; background: #f7f9fc; }
+.browse { color: #1a4fa0; font-size: 13px; font-weight: 600; }
+
+.duo { display: flex; flex-wrap: wrap; margin: 12px -6px; align-items: stretch; }
+.panel { flex: 1 1 340px; margin: 6px; border: 1px solid #e6e6e6;
+  border-radius: 8px; overflow: hidden; background: #fff;
+  display: flex; flex-direction: column; }
+.phead { font-size: 12.5px; font-weight: 700; padding: 8px 14px;
+  background: #f6f8fa; border-bottom: 1px solid #e6e6e6; color: #333; }
+.panel pre.code { border: 0; border-radius: 0; flex: 1; }
+.pfoot { font-size: 12px; color: #667; padding: 8px 14px;
+  border-top: 1px solid #f0f0f0; background: #fafbfc; }
+
+.tok-c { color: #6e7781; font-style: italic; }
+.tok-k { color: #0550ae; font-weight: 600; }
+.tok-s { color: #0a3069; }
+.tok-n { color: #953800; }
+.tok-t { color: #8250df; }
+
+table.results { width: 100%; border-collapse: collapse; font-size: 14px; margin: 10px 0; }
+.results th { text-align: left; color: #888; font-weight: 600; font-size: 12px;
+  text-transform: uppercase; letter-spacing: .4px; border-bottom: 1px solid #e6e6e6;
+  padding: 8px 10px; }
+.results td { border-bottom: 1px solid #f0f0f0; padding: 9px 10px; }
+
+.trademark { color: #999; font-size: 12px; margin-top: 28px; }
 .prose code { background: #f4f4f6; padding: 1px 5px; border-radius: 4px;
   font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 92%; }
 .prose blockquote { border-left: 3px solid #ddd; margin: 10px 0; padding: 4px 14px; color: #555; }
@@ -698,6 +919,10 @@ APP_JS = """// Progressive enhancement: client-side search and area filter on th
   var statussel = document.getElementById('statussel');
   if (areasel) areasel.addEventListener('change', function () { area = this.value; apply(); });
   if (statussel) statussel.addEventListener('change', function () { status = this.value; apply(); });
+
+  // Preset the area filter from ?area= (the About page's area cards link here).
+  var m = location.search.match(/[?&]area=(eBPF|LLVM|seL4)/);
+  if (m && areasel) { area = m[1]; areasel.value = area; apply(); }
 })();
 """
 

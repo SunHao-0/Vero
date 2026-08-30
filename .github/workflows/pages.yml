@@ -8,6 +8,7 @@ on:
     paths:
       - 'tasks/**'
       - 'solved/**'
+      - 'assets/**'
       - 'scripts/build_site.py'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
