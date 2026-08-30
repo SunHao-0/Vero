@@ -1,0 +1,5 @@
+# The benchmark tooling (scripts/, template/gen.py) uses only the Python
+# standard library; there is nothing to install. Python >= 3.9 is required.
+#
+# Solver-side dependencies (Lean 4, agent CLIs, lean-lsp-mcp) live in the
+# Docker image; see Dockerfile.
