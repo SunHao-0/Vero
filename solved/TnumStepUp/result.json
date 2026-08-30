@@ -1,0 +1,8 @@
+{
+  "task": "TnumStepUp",
+  "lang": "lean4",
+  "status": "PASS",
+  "solver_exit": 0,
+  "check_exit": 0,
+  "elapsed_s": 1278.7
+}

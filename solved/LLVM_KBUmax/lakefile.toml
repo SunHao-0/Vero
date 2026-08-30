@@ -1,0 +1,17 @@
+name = "lean-tacs"
+version = "0.1.0"
+defaultTargets = ["Tacs"]
+
+[[require]]
+name = "mathlib"
+scope = "leanprover-community"
+rev = "v4.28.0"
+
+[[require]]
+name = "quickcheck"
+git = "https://github.com/Lizn-zn/quickcheck"
+rev = "main"
+
+[[lean_lib]]
+name = "Tacs"
+
