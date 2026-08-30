@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile Python tooling
+        run: python3 -m compileall -q scripts template/gen.py
+
+      - name: Regenerate tasks and verify tasks/ is in sync
+        run: |
+          python3 template/gen.py tasks --all
+          git diff --exit-code tasks/
+          test -z "$(git status --porcelain tasks/)"
+
+      - name: Integrity and cheat gates on every task
+        run: |
+          for d in tasks/*/; do
+            (cd "$d" && ./check.sh --check-integrity && ./check.sh --cheats-only) \
+              || { echo "FAILED: $d"; exit 1; }
+          done
+
+      - name: Build the site
+        run: python3 scripts/build_site.py
