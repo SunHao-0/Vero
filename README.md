@@ -9,17 +9,18 @@ LLVM's KnownBits and DemandedBits (27), and seL4 kernel optimizations
 
 ## Features
 
-- **Real-world.** Every task comes from a production system---the Linux
+- **Real-world.** Every task comes from _**a production system**_---the Linux
   kernel's eBPF verifier, LLVM, and seL4---not from a textbook exercise or
   a programming contest. For example, the eBPF tasks are value-tracking
   operators of the verifier (`kernel/bpf/verifier.c`).
-- **New specification.** Each task encodes a requirement the upstream
+- **New specification.** Each task encodes _**a new requirement**_ the upstream
   implementation does not yet meet, distilled from our upstream experience
   and documented community needs. For example, the eBPF tasks require
-  abstract operators that are provably sound and optimal, a bar the
-  verifier's current operators miss.
+  abstract operators that are provably _sound and optimal_, a bar the
+  verifier's current implementation does not reach; hence real requirement
+  and _less data contamination_ concern.
 - **Valuable to solve.** A correct solution is potentially an upstream
-  contribution, not just a benchmark score. For example, the solution to
+  _**contribution, not just a benchmark score**_. For example, the solution to
   the `tnum_step()` task is [merged into the Linux
   kernel](https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git/commit/?id=833ef4a954e1),
   contributing a provably-correct operator.
@@ -200,3 +201,20 @@ make run
 Copilot authenticates with `COPILOT_GITHUB_TOKEN`: a fine-grained PAT
 with the Copilot Requests permission, or a Copilot OAuth token (classic
 `ghp_` PATs are rejected).
+
+## Citation
+
+```bibtex
+@inproceedings{vero2027,
+  title     = {From Specification to Kernel Commit: Verified Code Generation
+               on Real-World Systems},
+  author    = {Sun, Hao and Li, Zenan and Li, Cong and Su, Zhendong},
+  booktitle = {Proceedings of ASPLOS '27},
+  year      = {2027},
+}
+```
+
+**Note.** Do not confuse this benchmark with the repository-level benchmark of
+the same name in [arXiv:2608.13522](https://arxiv.org/abs/2608.13522); ours is
+accepted to
+[ASPLOS 2027](https://www.asplos-conference.org/asplos2027/cfp/).

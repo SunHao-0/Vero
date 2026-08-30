@@ -69,12 +69,16 @@ def _iso_to_epoch(s: Optional[str]) -> Optional[float]:
 
 
 def short_cmd(cmd: str, max_len: int = 80) -> str:
-    """Strip a common bash wrapper and truncate for display."""
+    """Strip a common bash wrapper, collapse to one line, and truncate.
+
+    Heredocs and multi-line scripts are common, and an embedded newline
+    would break the progress and summary tables.
+    """
     for prefix in ("/bin/bash -lc ", "/usr/bin/bash -lc "):
         if cmd.startswith(prefix):
             cmd = cmd[len(prefix):]
             break
-    cmd = cmd.strip("'\"")
+    cmd = " ".join(cmd.split()).strip("'\"")
     if len(cmd) > max_len:
         cmd = cmd[: max_len - 3] + "..."
     return cmd
@@ -100,8 +104,9 @@ class SolverMonitor:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.total_cached_tokens = 0
-        # tool_use_id -> ts for pairing with tool_result.
-        self._pending_tools: dict[str, float] = {}
+        # tool_use_id -> (ts, label) for pairing with tool_result. The label
+        # is captured here because the result carries only the id.
+        self._pending_tools: dict[str, tuple[float, str]] = {}
         # 10 slowest (duration, command) pairs, newest ties last.
         self.slowest: list[tuple[float, str]] = []
         self.total_tool_time = 0.0
@@ -158,9 +163,6 @@ class SolverMonitor:
         name = item.get("name", "")
         inp = item.get("input", {})
         self.cmd_count += 1
-        tool_id = item.get("id")
-        if tool_id and ts:
-            self._pending_tools[tool_id] = ts
 
         detail = ""
         if name == "Bash":
@@ -171,6 +173,11 @@ class SolverMonitor:
             detail = inp.get("file_path", "")
         elif name.startswith("mcp__lean-lsp__"):
             detail = name.removeprefix("mcp__lean-lsp__")
+
+        tool_id = item.get("id")
+        if tool_id and ts:
+            label = f"{name} {detail}".strip() if detail else name
+            self._pending_tools[tool_id] = (ts, label[:80])
 
         if live:
             suffix = f" {detail}" if detail else ""
@@ -195,9 +202,10 @@ class SolverMonitor:
         for item in msg.get("content", []) or []:
             if item.get("type") != "tool_result":
                 continue
-            start = self._pending_tools.pop(item.get("tool_use_id", ""), None)
-            if start is not None:
-                self._record_tool_duration(ts - start, _describe_tool_result(item))
+            pending = self._pending_tools.pop(item.get("tool_use_id", ""), None)
+            if pending is not None:
+                start, label = pending
+                self._record_tool_duration(ts - start, label)
 
     def _on_result(self, ev: dict, live: bool) -> None:
         self.turn_count = ev.get("num_turns", self.turn_count)
@@ -246,19 +254,6 @@ class SolverMonitor:
         print()
 
 
-def _describe_tool_result(item: dict) -> str:
-    """Short label for a tool_result event (falls back to the tool_use_id)."""
-    tid = item.get("tool_use_id", "?")
-    content = item.get("content")
-    if isinstance(content, list) and content:
-        first = content[0]
-        if isinstance(first, dict):
-            snippet = first.get("text", "")[:60].replace("\n", " ")
-            if snippet:
-                return f"{tid}: {snippet}"
-    return tid
-
-
 _HANDLERS = {
     "system":    lambda m, ev, live: None,  # session metadata; nothing to track
     "assistant": SolverMonitor._on_assistant,
@@ -296,8 +291,8 @@ class CopilotMonitor:
         self.lines_added = 0
         self.lines_removed = 0
         self.files_modified = 0
-        # toolCallId -> start ts, for pairing with tool.execution_complete.
-        self._pending_tools: dict[str, float] = {}
+        # toolCallId -> (start ts, label), for pairing with execution_complete.
+        self._pending_tools: dict[str, tuple[float, str]] = {}
         self.slowest: list[tuple[float, str]] = []
         self.total_tool_time = 0.0
 
@@ -359,22 +354,24 @@ class CopilotMonitor:
     def _on_tool_start(self, data: dict, ts: Optional[float], live: bool) -> None:
         self.cmd_count += 1
         cid = data.get("toolCallId")
-        if cid and ts is not None:
-            self._pending_tools[cid] = ts
         name = data.get("toolName", "")
         args = data.get("arguments") or {}
         if name == "bash":
             self._track_command(args.get("command", ""))
+        detail = _copilot_tool_detail(name, args)
+        if cid and ts is not None:
+            label = f"{name} {detail}".strip() if detail else name
+            self._pending_tools[cid] = (ts, label[:80])
         if live:
-            detail = _copilot_tool_detail(name, args)
             suffix = f" {detail}" if detail else ""
             print(f"  {_line_tag(self)} "
                   f"{CYAN}{name}{NC}{suffix}", flush=True)
 
     def _on_tool_complete(self, data: dict, ts: Optional[float]) -> None:
-        start = self._pending_tools.pop(data.get("toolCallId", ""), None)
-        if start is not None and ts is not None:
-            self._record_tool_duration(ts - start, _copilot_result_label(data))
+        pending = self._pending_tools.pop(data.get("toolCallId", ""), None)
+        if pending is not None and ts is not None:
+            start, label = pending
+            self._record_tool_duration(ts - start, label)
 
     def _on_result(self, ev: dict, live: bool) -> None:
         usage = ev.get("usage") or {}
@@ -463,17 +460,6 @@ def _copilot_tool_detail(name: str, args: dict) -> str:
         if isinstance(val, (str, int, float)) and str(val):
             return f"{key}={str(val)[:60]}"
     return ""
-
-
-def _copilot_result_label(data: dict) -> str:
-    """Short label for a tool.execution_complete event (for the slowest list)."""
-    cid = (data.get("toolCallId") or "?")[:12]
-    result = data.get("result")
-    content = result.get("content") if isinstance(result, dict) else None
-    if isinstance(content, str) and content.strip():
-        snippet = content[:60].replace("\n", " ")
-        return f"{cid}: {snippet}"
-    return f"{cid} ({'ok' if data.get('success') else 'fail'})"
 
 
 # ---------------------------------------------------------------------------

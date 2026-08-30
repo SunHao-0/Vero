@@ -241,6 +241,28 @@ def recheck_tasks(
 # Transcript parsing
 # ---------------------------------------------------------------------------
 
+# USD per million tokens: (input, output, cache_read, cache_write_5m,
+# cache_write_1h). Cache writes are 1.25x (5m) and 2x (1h) the input rate,
+# cache reads 0.1x. Used only to estimate the cost of a run whose transcript
+# has no terminal `result` event; a completed run reports its own cost.
+MODEL_PRICES = {
+    "claude-opus-5":   (5.0, 25.0, 0.5, 6.25, 10.0),
+    "claude-opus-4-8": (5.0, 25.0, 0.5, 6.25, 10.0),
+    "claude-opus-4-7": (5.0, 25.0, 0.5, 6.25, 10.0),
+    "claude-sonnet-5": (2.0, 10.0, 0.2, 2.50, 4.0),
+    "claude-haiku-4-5": (1.0, 5.0, 0.1, 1.25, 2.0),
+}
+
+
+def _estimate_cost(model: str, u: Dict[str, int]) -> Optional[float]:
+    """Cost of the summed usage `u`, or None for an unpriced model."""
+    price = MODEL_PRICES.get(model)
+    if price is None:
+        return None
+    p_in, p_out, p_read, p_w5m, p_w1h = price
+    return (u["input"] * p_in + u["output"] * p_out + u["cache_read"] * p_read
+            + u["cw_5m"] * p_w5m + u["cw_1h"] * p_w1h) / 1e6
+
 TOOL_CATEGORIES = {
     "Read": "read",
     "Glob": "read",
@@ -293,6 +315,8 @@ def parse_transcript(transcript_path: Path) -> Dict[str, Any]:
     stats = {
         "turns": 0,
         "cost_usd": 0.0,
+        "cost_is_estimate": False,
+        "model": "",
         "total_input_tokens": 0,
         "total_output_tokens": 0,
         "total_cache_read_tokens": 0,
@@ -322,6 +346,13 @@ def parse_transcript(transcript_path: Path) -> Dict[str, Any]:
     current_turn_input = 0
     current_turn_output = 0
 
+    # Streaming emits several assistant events per API request, all sharing
+    # one message id and repeating that request's usage. Summing them
+    # double-counts, so keep the largest value seen per id, per field.
+    per_msg: Dict[str, Dict[str, int]] = {}
+    result_usage: Optional[Dict[str, Any]] = None
+    thinking_tokens = 0
+
     for line in lines:
         if not line.strip():
             continue
@@ -335,7 +366,13 @@ def parse_transcript(transcript_path: Path) -> Dict[str, Any]:
         if t == "rate_limit_event":
             stats["is_rate_limited"] = True
 
+        elif t == "system" and d.get("subtype") == "thinking_tokens":
+            # The only record of reasoning tokens: assistant events carry a
+            # partial output count, and a killed run has no result event.
+            thinking_tokens += d.get("estimated_tokens_delta", 0) or 0
+
         elif t == "result":
+            result_usage = d.get("usage") or {}
             stats["cost_usd"] = d.get("total_cost_usd", 0.0) or 0.0
             stats["turns"] = d.get("num_turns", 0)
             stats["duration_ms"] = d.get("duration_ms", 0)
@@ -348,15 +385,24 @@ def parse_transcript(transcript_path: Path) -> Dict[str, Any]:
             stats["_assistant_msgs"] += 1
             msg = d.get("message", {})
             usage = msg.get("usage", {})
-            inp = usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0) + usage.get("cache_creation_input_tokens", 0)
-            out = usage.get("output_tokens", 0)
-            stats["total_input_tokens"] += inp
-            stats["total_output_tokens"] += out
-            stats["total_cache_read_tokens"] += usage.get("cache_read_input_tokens", 0)
-            stats["total_cache_creation_tokens"] += usage.get("cache_creation_input_tokens", 0)
+            stats["model"] = msg.get("model") or stats["model"]
+            cc = usage.get("cache_creation") or {}
+            slot = per_msg.setdefault(msg.get("id") or f"_{len(per_msg)}", {})
+            for key, val in (
+                ("input", usage.get("input_tokens", 0)),
+                ("output", usage.get("output_tokens", 0)),
+                ("cache_read", usage.get("cache_read_input_tokens", 0)),
+                ("cache_creation", usage.get("cache_creation_input_tokens", 0)),
+                ("cw_5m", cc.get("ephemeral_5m_input_tokens", 0)),
+                ("cw_1h", cc.get("ephemeral_1h_input_tokens", 0)),
+            ):
+                slot[key] = max(slot.get(key, 0), val or 0)
 
+            inp = (usage.get("input_tokens", 0)
+                   + usage.get("cache_read_input_tokens", 0)
+                   + usage.get("cache_creation_input_tokens", 0))
             current_turn_input += inp
-            current_turn_output += out
+            current_turn_output += usage.get("output_tokens", 0)
 
             for content_item in msg.get("content", []):
                 if content_item.get("type") == "tool_use":
@@ -390,10 +436,121 @@ def parse_transcript(transcript_path: Path) -> Dict[str, Any]:
                 current_turn_input = 0
                 current_turn_output = 0
 
-    if stats["turns"] == 0 and stats["_assistant_msgs"] > 0:
-        stats["turns"] = stats["_assistant_msgs"]
+    agg = {k: sum(m.get(k, 0) for m in per_msg.values())
+           for k in ("input", "output", "cache_read", "cache_creation",
+                     "cw_5m", "cw_1h")}
+
+    if result_usage is not None:
+        # A completed run reports its own totals; trust them.
+        rcc = result_usage.get("cache_creation") or {}
+        read = result_usage.get("cache_read_input_tokens", 0)
+        created = result_usage.get("cache_creation_input_tokens", 0)
+        stats["total_output_tokens"] = result_usage.get("output_tokens", 0)
+        stats["total_input_tokens"] = (
+            result_usage.get("input_tokens", 0) + read + created)
+        stats["total_cache_read_tokens"] = read
+        stats["total_cache_creation_tokens"] = created
+    else:
+        # Killed mid-run (TIMEOUT, or the container died): no result event,
+        # so reconstruct. Input and cache totals are exact; output is the
+        # recovered reasoning tokens plus whatever the events recorded.
+        agg["output"] += thinking_tokens
+        stats["total_output_tokens"] = agg["output"]
+        stats["total_input_tokens"] = (
+            agg["input"] + agg["cache_read"] + agg["cache_creation"])
+        stats["total_cache_read_tokens"] = agg["cache_read"]
+        stats["total_cache_creation_tokens"] = agg["cache_creation"]
+        est = _estimate_cost(stats["model"], agg)
+        if est is not None:
+            stats["cost_usd"] = est
+            stats["cost_is_estimate"] = True
+
+    if stats["turns"] == 0:
+        stats["turns"] = len(per_msg) or stats["_assistant_msgs"]
 
     return stats
+
+
+# ---------------------------------------------------------------------------
+# LLM review
+# ---------------------------------------------------------------------------
+
+LLM_REVIEW_FILE = "llm_review.json"
+LLM_TOKEN_VARS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
+
+
+def _load_llm_check():
+    """Import scripts/llm_check.py as a module, by path so this works
+    however analyze_bench.py itself was imported."""
+    import importlib.util
+    path = Path(__file__).resolve().parent / "llm_check.py"
+    spec = importlib.util.spec_from_file_location("llm_check", str(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def llm_reviewer_available() -> bool:
+    """True when scripts/llm_check.py can authenticate: either a token is
+    exported, or the claude CLI is installed and carries its own login
+    (`claude setup-token` / an interactive subscription login)."""
+    if any(os.environ.get(v) for v in LLM_TOKEN_VARS):
+        return True
+    return shutil.which("claude") is not None
+
+
+def _tasks_to_review(
+    output_dir: Path, rechecks: Optional[Dict[str, Recheck]],
+) -> List[Path]:
+    """PASS tasks after any recheck: a solution that no longer passes the
+    mechanical gates does not need a reviewer."""
+    dirs = []
+    for td in sorted((output_dir / "tasks").iterdir()):
+        result_file = td / "result.json"
+        if not (td.is_dir() and result_file.exists()):
+            continue
+        try:
+            status = json.loads(result_file.read_text()).get("status")
+        except json.JSONDecodeError:
+            continue
+        if rechecks and td.name in rechecks:
+            status = rechecks[td.name].new_status
+        if status == "PASS":
+            dirs.append(td)
+    return dirs
+
+
+def run_llm_reviews(
+    output_dir: Path,
+    rechecks: Optional[Dict[str, Recheck]],
+    *,
+    model: str,
+    parallel: int,
+    timeout: int,
+    force: bool,
+) -> None:
+    """Review PASS solutions, writing llm_review.json per task. Verdicts
+    are picked up from disk when the report is built."""
+    dirs = _tasks_to_review(output_dir, rechecks)
+    if not force:
+        dirs = [d for d in dirs if not (d / LLM_REVIEW_FILE).exists()]
+    if not dirs:
+        print("  No PASS tasks need review.")
+        return
+
+    llm = _load_llm_check()
+    print(f"  Reviewing {len(dirs)} PASS solutions with {model} "
+          f"(parallel={parallel}); skip with --skip-llm.")
+    with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
+        futures = {pool.submit(llm.review_task, d, model, timeout): d
+                   for d in dirs}
+        for fut in as_completed(futures):
+            try:
+                r = fut.result()
+            except Exception as e:
+                print(f"    EXCEPTION  {futures[fut].name}: {e}")
+                continue
+            print(f"    {r.get('verdict', 'ERROR'):>9}  {r['task']}")
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +570,7 @@ class TaskRecord:
     recheck: Optional[Recheck]
     timeout_cause: Optional[str]
     error_cause: Optional[str]
+    llm: Optional[Dict[str, Any]] = None
 
 
 def _classify_timeout(ts: Dict[str, Any]) -> str:
@@ -462,6 +620,7 @@ def _build_task_record(
         recheck=recheck,
         timeout_cause=_classify_timeout(ts) if result["status"] == "TIMEOUT" else None,
         error_cause=_classify_error(ts) if result["status"] == "ERROR" else None,
+        llm=_read_json(task_dir / LLM_REVIEW_FILE) or None,
     )
 
 
@@ -470,6 +629,12 @@ def _build_task_record(
 # ---------------------------------------------------------------------------
 
 _STATUSES = ("PASS", "FAIL", "TIMEOUT", "ERROR")
+
+
+def _fmt_cost(ts: Dict[str, Any], width: int = 0) -> str:
+    """Cost as text; `~` prefix when reconstructed from a killed run."""
+    txt = f"{'~' if ts.get('cost_is_estimate') else ''}${ts['cost_usd']:.2f}"
+    return f"{txt:>{width}}" if width else txt
 
 
 def _stats_str(vals: List[float], fmt: str = ".1f") -> str:
@@ -533,6 +698,43 @@ def _print_status_changes(tasks: List[TaskRecord], section: Section) -> None:
             print(f"    x {t.name:<20} PASS    -> {t.effective_status:<8}  ({failures})")
 
 
+def _print_llm_reviews(tasks: List[TaskRecord], section: Section) -> None:
+    reviewed = [t for t in tasks if t.llm]
+    if not reviewed:
+        return
+    section(f"LLM REVIEW ({len(reviewed)} solutions)")
+    print("\n  Judged: provided sections untouched, proof faithful, "
+          "complexity rule met.")
+    print(f"\n  {'Task':<30} {'Verdict':<10} {'spec':<5} {'proof':<6} {'cx':<4}")
+    print("  " + "-" * 60)
+
+    def flag(r, key):
+        v = r.get(key)
+        return "-" if v is None else ("ok" if v else "NO")
+
+    counts: Counter = Counter()
+    for t in sorted(reviewed, key=lambda x: x.name):
+        r = t.llm
+        if "error" in r:
+            counts["ERROR"] += 1
+            print(f"  {t.name:<30} {'ERROR':<10} {r['error'][:40]}")
+            continue
+        verdict = r.get("verdict", "?")
+        counts[verdict] += 1
+        print(f"  {t.name:<30} {verdict:<10} {flag(r, 'spec_unmodified'):<5} "
+              f"{flag(r, 'proof_faithful'):<6} {flag(r, 'complexity_ok'):<4}")
+        for issue in r.get("issues", [])[:3]:
+            print(f"      - {issue}")
+
+    cost = sum(t.llm.get("cost_usd") or 0 for t in reviewed)
+    parts = [f"{k}: {counts[k]}" for k in ("ACCEPT", "REJECT", "UNCERTAIN", "ERROR")
+             if counts.get(k)]
+    print(f"\n  {'  '.join(parts)}   cost: ${cost:.2f}")
+    if counts.get("REJECT") or counts.get("UNCERTAIN"):
+        print("  A REJECT or UNCERTAIN verdict is advisory; confirm by hand "
+              "before discarding a PASS.")
+
+
 def _print_failures(tasks: List[TaskRecord], section: Section) -> None:
     fails = [t for t in tasks if t.effective_status == "FAIL"]
     section(f"FAIL ANALYSIS ({len(fails)} tasks)")
@@ -553,7 +755,7 @@ def _print_timeouts(tasks: List[TaskRecord], section: Section) -> None:
     for t in timeouts:
         ts = t.transcript
         print(f"\n  {t.name}: elapsed={t.elapsed_s:.0f}s, turns={ts['turns']}, "
-              f"cost=${ts['cost_usd']:.3f}, cause={t.timeout_cause}")
+              f"cost={_fmt_cost(ts)}, cause={t.timeout_cause}")
         if ts["result_text"]:
             print(f"    result: {ts['result_text'][:120]}")
 
@@ -649,7 +851,7 @@ def _print_hardest_pass(pass_tasks: List[TaskRecord]) -> None:
     for t in sorted(pass_tasks, key=lambda t: -t.elapsed_s)[:10]:
         ts = t.transcript
         print(f"    {t.name:<20} {t.elapsed_s:>6.0f}s  "
-              f"turns={ts['turns']:>3}  cost=${ts['cost_usd']:.3f}  "
+              f"turns={ts['turns']:>3}  cost={_fmt_cost(ts)}  "
               f"check_runs={ts['check_sh_runs']}")
 
 
@@ -674,15 +876,18 @@ def _print_full_table(tasks: List[TaskRecord], section: Section) -> None:
         status = (f"{t.original_status}->{t.effective_status}"
                   if t.original_status != t.effective_status else t.effective_status)
         print(f"  {t.name:<20} {status:<10} {t.elapsed_s:>8.0f} "
-              f"{ts['turns']:>6} {ts['cost_usd']:>8.3f} "
+              f"{ts['turns']:>6} {_fmt_cost(ts, 8)} "
               f"{ts['total_input_tokens']:>7} {ts['total_output_tokens']:>7} "
               f"{sum(ts['tool_calls'].values()):>6}")
 
     costs = [t.transcript["cost_usd"] for t in tasks if t.transcript["cost_usd"] > 0]
+    est_n = sum(1 for t in tasks
+                if t.transcript.get("cost_is_estimate") and t.transcript["cost_usd"] > 0)
     total_hours = sum(t.elapsed_s for t in tasks) / 3600
     print(f"\n  Total wall time: {total_hours:.1f} hours")
     if costs and tasks:
-        print(f"  Total cost: ${sum(costs):.2f}")
+        note = f"  ({est_n} reconstructed, marked ~)" if est_n else ""
+        print(f"  Total cost: ${sum(costs):.2f}{note}")
         print(f"  Avg cost per task: ${sum(costs) / len(tasks):.3f}")
 
 
@@ -706,6 +911,7 @@ def analyze(output_dir: Path, rechecks: Optional[Dict[str, Recheck]] = None) -> 
     _print_summary(tasks, has_recheck, section)
     if has_recheck:
         _print_status_changes(tasks, section)
+    _print_llm_reviews(tasks, section)
     _print_failures(tasks, section)
     _print_timeouts(tasks, section)
     _print_errors(tasks, section)
@@ -731,7 +937,24 @@ def main():
     )
     parser.add_argument(
         "--parallel", type=int, default=1,
-        help="Number of parallel workers for rechecking (default: 1)",
+        help="Number of parallel workers for rechecking and review (default: 1)",
+    )
+    parser.add_argument(
+        "--skip-llm", action="store_true",
+        help="Skip the LLM review of PASS solutions (by default it runs "
+             "when a Claude token is set)",
+    )
+    parser.add_argument(
+        "--force-llm", action="store_true",
+        help=f"Re-review tasks that already have a {LLM_REVIEW_FILE}",
+    )
+    parser.add_argument(
+        "--llm-model", default=None,
+        help="Reviewer model (default: the llm_check.py default)",
+    )
+    parser.add_argument(
+        "--llm-timeout", type=int, default=600, metavar="SECONDS",
+        help="Per-review timeout (default: 600)",
     )
     args = parser.parse_args()
 
@@ -745,6 +968,18 @@ def main():
     if not args.skip_recheck:
         print(f"\nRechecking PASS/FAIL tasks in {output_dir}...")
         rechecks = recheck_tasks(output_dir, parallel=args.parallel)
+
+    if args.skip_llm:
+        pass
+    elif not llm_reviewer_available():
+        print(f"\nSkipping LLM review: no claude CLI on PATH and none of "
+              f"{', '.join(LLM_TOKEN_VARS)} is set.")
+    else:
+        print(f"\nLLM review of PASS solutions in {output_dir}...")
+        model = args.llm_model or _load_llm_check().DEFAULT_MODEL
+        run_llm_reviews(output_dir, rechecks, model=model,
+                        parallel=args.parallel, timeout=args.llm_timeout,
+                        force=args.force_llm)
 
     analyze(output_dir, rechecks)
 
