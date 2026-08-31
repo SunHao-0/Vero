@@ -7,6 +7,12 @@ abstract interpretation operators from the eBPF verifier (52),
 LLVM's KnownBits and DemandedBits (27), and seL4 kernel optimizations
 (24).
 
+| Area | Author | Tasks |
+|------|--------|-------|
+| eBPF | Hao Sun <hao.sun@inf.ethz.ch> | 52 eBPF tasks |
+| LLVM | Cong Li <cong.li@inf.ethz.ch> | 27 KnownBits/DemandedBits tasks |
+| seL4 | Zenan Li <zenan.li@inf.ethz.ch> | 24 seL4 optimization tasks |
+
 ## Features
 
 - **Real-world.** Every task comes from _**a production system**_---the Linux
@@ -17,19 +23,83 @@ LLVM's KnownBits and DemandedBits (27), and seL4 kernel optimizations
   implementation does not yet meet, distilled from our upstream experience
   and documented community needs. For example, the eBPF tasks require
   abstract operators that are provably _sound and optimal_, a bar the
-  verifier's current implementation does not reach; hence real requirement
-  and _less data contamination_ concern.
+  verifier's current implementation does not reach, which makes the
+  requirement real and _data contamination unlikely_.
 - **Valuable to solve.** A correct solution is potentially an upstream
   _**contribution, not just a benchmark score**_. For example, the solution to
   the `tnum_step()` task is [merged into the Linux
   kernel](https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git/commit/?id=833ef4a954e1),
   contributing a provably-correct operator.
 
-| Area | Author | Tasks |
-|------|--------|-------|
-| eBPF | Hao Sun <hao.sun@inf.ethz.ch> | 52 eBPF tasks |
-| LLVM | Cong Li <cong.li@inf.ethz.ch> | 27 KnownBits/DemandedBits tasks |
-| seL4 | Zenan Li <zenan.li@inf.ethz.ch> | 24 seL4 optimization tasks |
+#### Example: A Solution Merged into the Linux Kernel
+
+`tnum_step()` returns the smallest member of a tnum strictly above `z`, a
+subroutine of the verifier's range analysis. Claude Code solved it with a
+branchless algorithm and a machine-checked proof.
+
+<table>
+<tr>
+<th>Lean 4 solution </th>
+<th><a href="https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git/commit/?id=833ef4a954e1">Merged code</a></th>
+</tr>
+<tr>
+<td valign="top">
+
+```lean
+def tnumStepUp (tval tmask z : ..) :=
+  let d := z - tval
+  let carry := d &&& ~~~tmask
+  ...
+
+-- r is the least tnum member above z
+theorem tnumStepUp_correct
+    (tval tmask z : BitVec 64)
+    (h_tnum : tval &&& tmask = 0)
+    (h_lo : tval ≤ z)
+    (h_hi : z < (tval ||| tmask)) :
+    let r := tnumStepUp tval tmask z
+    satisfiesTnum64 r tval tmask ∧
+    tval ≤ r ∧
+    r ≤ (tval ||| tmask) ∧ z < r ∧
+    ∀ w, satisfiesTnum64 w tval tmask
+      → z < w → r ≤ w := by
+  ...
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩ <;>
+    intros <;> bv_decide
+```
+
+</td>
+<td valign="top">
+
+```c
+u64 tnum_step(struct tnum t, u64 z)
+{
+  ...
+  /*
+   * Every member is t.value + s for
+   * a submask s of t.mask, so r > z
+   * reduces to s > d, d = z - t.value
+   * -- increment d "within the mask":
+   * fill every non-mask position with
+   * 1 so the +1 ripples through the
+   * gaps, then keep only mask bits;
+   * carry_mask also fills below the
+   * highest non-mask 1 in d.
+   */
+  d = z - t.value;
+  carry = (1 << fls64(d & ~t.mask)) - 1;
+  filled = d | carry | ~t.mask;
+  inc = (filled + 1) & t.mask;
+  return t.value | inc;
+}
+```
+
+</td>
+</tr>
+</table>
+
+Both excerpts are re-wrapped for width; the full artifact is
+under `solved/TnumStepUp/`.
 
 ## Repository Structure
 

@@ -63,9 +63,6 @@ site: ## Build the static website into site/ (pass REPO_URL=... for GitHub links
 serve: ## Build and serve the website locally (PORT, default 8000)
 	$(PY) scripts/serve_site.py --port $(PORT) --repo-url "$(REPO_URL)"
 
-clean:  ## Clean up
-	rm -rf $(OUTPUT_DIR)
-
 check-auth:
 	@if echo "$(SOLVER)" | grep -q copilot; then \
 	  [ -n "$$COPILOT_GITHUB_TOKEN$$GH_TOKEN$$GITHUB_TOKEN" ] \
