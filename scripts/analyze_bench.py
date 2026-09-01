@@ -4,8 +4,9 @@ Analysis of Lean4 benchmark results.
 
 Reads <output-dir>/tasks/<name>/result.json + logs/transcript.jsonl
 produced by run_bench.py and prints a report: status summary, recovery
-deltas after re-running check.sh, FAIL/TIMEOUT/ERROR breakdowns,
-PASS-task activity stats, and a per-task table.
+deltas after re-running check.sh, the LLM review of each PASS task
+(scripts/llm_check.py, run in isolation), FAIL/TIMEOUT/ERROR
+breakdowns, PASS-task activity stats, and a per-task table.
 
 Usage:
     python analyze_bench.py --output-dir /path/to/bench_output
@@ -529,8 +530,11 @@ def run_llm_reviews(
     timeout: int,
     force: bool,
 ) -> None:
-    """Review PASS solutions, writing llm_review.json per task. Verdicts
-    are picked up from disk when the report is built."""
+    """Review each PASS solution with scripts/llm_check.py, which stages
+    the issued task plus the submitted Task.lean in a temporary dir and
+    judges it there, so logs and notes never reach the judge. Writes
+    llm_review.json per task; verdicts are picked up from disk when the
+    report is built."""
     dirs = _tasks_to_review(output_dir, rechecks)
     if not force:
         dirs = [d for d in dirs if not (d / LLM_REVIEW_FILE).exists()]
@@ -703,10 +707,10 @@ def _print_llm_reviews(tasks: List[TaskRecord], section: Section) -> None:
     if not reviewed:
         return
     section(f"LLM REVIEW ({len(reviewed)} solutions)")
-    print("\n  Judged: provided sections untouched, proof faithful, "
-          "complexity rule met.")
-    print(f"\n  {'Task':<30} {'Verdict':<10} {'spec':<5} {'proof':<6} {'cx':<4}")
-    print("  " + "-" * 60)
+    print("\n  Judged in isolation: no check.sh bypass (faithful), "
+          "complexity rule met (cx).")
+    print(f"\n  {'Task':<30} {'Verdict':<10} {'faithful':<9} {'cx':<4}")
+    print("  " + "-" * 56)
 
     def flag(r, key):
         v = r.get(key)
@@ -721,8 +725,8 @@ def _print_llm_reviews(tasks: List[TaskRecord], section: Section) -> None:
             continue
         verdict = r.get("verdict", "?")
         counts[verdict] += 1
-        print(f"  {t.name:<30} {verdict:<10} {flag(r, 'spec_unmodified'):<5} "
-              f"{flag(r, 'proof_faithful'):<6} {flag(r, 'complexity_ok'):<4}")
+        print(f"  {t.name:<30} {verdict:<10} {flag(r, 'faithful'):<9} "
+              f"{flag(r, 'complexity_ok'):<4}")
         for issue in r.get("issues", [])[:3]:
             print(f"      - {issue}")
 
@@ -953,8 +957,8 @@ def main():
         help="Reviewer model (default: the llm_check.py default)",
     )
     parser.add_argument(
-        "--llm-timeout", type=int, default=600, metavar="SECONDS",
-        help="Per-review timeout (default: 600)",
+        "--llm-timeout", type=int, default=900, metavar="SECONDS",
+        help="Per-review timeout (default: 900)",
     )
     args = parser.parse_args()
 

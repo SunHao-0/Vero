@@ -54,7 +54,7 @@ analyze: ## Re-check and analyze the results in OUTPUT_DIR
 	$(PY) scripts/analyze_bench.py --output-dir $(OUTPUT_DIR)
 
 llm-check: SOLVER := scripts/claude_code.sh
-llm-check: check-auth ## Run llm check
+llm-check: check-auth ## LLM-review the PASS solutions in OUTPUT_DIR (isolated judge; ARGS='--force')
 	$(PY) scripts/llm_check.py $(OUTPUT_DIR) --parallel $(PARALLEL) $(ARGS)
 
 site: ## Build the static website into site/ (pass REPO_URL=... for GitHub links)
