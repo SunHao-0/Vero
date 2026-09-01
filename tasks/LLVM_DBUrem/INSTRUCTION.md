@@ -58,7 +58,7 @@ rather than after a failed proof.
    `lean-toolchain`, or `lake-manifest.json`.
 4. Add helpers/lemmas in AUX. No user-defined `axiom` anywhere outside
    the provided AXIOMS section.
-5. **No hard complexity bound is imposed for this operator** — an optimal transfer function here may genuinely need more than constant work. But **brute force scores ZERO**: we expect an insightful algorithm, and the human review rejects any implementation whose running time scales with the number of concrete values represented rather than with the bit-width. This includes enumerating the concretization, O(2^popcount(mask)) case explosion, and **tree recursion over the 64 bit positions** — recursion that branches at each bit is 2^64 work even though it is only 64 levels deep. Algorithms polynomial in the bit-width (O(64), O(64²), ...) are acceptable; simpler and tighter is better.
+5. **No hard complexity bound is imposed for this operator** --- an optimal transfer function here may genuinely need more than constant work. But **brute force scores ZERO**: we expect an insightful algorithm, and the human review rejects any implementation whose running time scales with the number of concrete values represented rather than with the bit-width. This includes enumerating the concretization, O(2^popcount(mask)) case explosion, and **tree recursion over the 64 bit positions** --- recursion that branches at each bit is 2^64 work even though it is 64 levels deep. 
 
    **Forbidden anywhere outside provided sections** (auto-checked, instant FAIL):
    - `sorry`, `admit`, `admitGoal`, `sorryAx`, `lcProof` — proof holes
