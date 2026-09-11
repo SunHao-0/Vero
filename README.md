@@ -13,6 +13,7 @@ LLVM's KnownBits and DemandedBits (27), and seL4 kernel optimizations
 | LLVM | Cong Li <cong.li@inf.ethz.ch> | 27 KnownBits/DemandedBits tasks |
 | seL4 | Zenan Li <zenan.li@inf.ethz.ch> | 24 seL4 optimization tasks |
 
+**Leaderboard**: https://haosun.info/Vero/
 ## Features
 
 - **Real-world.** Every task comes from _**a production system**_---the Linux
