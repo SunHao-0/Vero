@@ -6,11 +6,11 @@ Runs a solver against verification tasks under tasks/<category>_<Name>/
 (e.g. eBPF_Cnum_Alu64Add, LLVM_KBUdiv, seL4_AllocRegion), in parallel,
 optionally inside Docker containers, tracking progress via git commits.
 
-Task liveness: solved tasks (published under solved/) are excluded by
-default, because agents run with web access and a published solution
-could contaminate the result. --run-all includes them but disables the
-agents' web tools (VERO_DISABLE_WEB=1), under which a solved task
-remains a valid benchmark target.
+Task liveness: a published solution (under solved/) is one web search
+away, so a run either drops the solved tasks or takes away the web. By
+default every task runs and the agents' web tools are disabled
+(VERO_DISABLE_WEB=1); --run-unsolved runs only the unsolved tasks and
+leaves the web tools enabled.
 """
 
 import argparse
@@ -265,20 +265,20 @@ def _is_solved(task_name: str, solved_names: set) -> bool:
 
 
 def filter_solved_tasks(
-    tasks: List[Task], bench_root: Path, run_all: bool, *, quiet: bool = False,
+    tasks: List[Task], bench_root: Path, run_unsolved: bool, *,
+    quiet: bool = False,
 ) -> List[Task]:
-    """Drop solved tasks unless --run-all is set: their published
-    solutions are one web search away, so they are only live for runs
-    with web access disabled."""
+    """Drop solved tasks when --run-unsolved is set: that mode gives the
+    agent web access, and a published solution is one search away."""
     solved = _solved_task_names(bench_root)
-    if run_all or not solved:
+    if not run_unsolved or not solved:
         return tasks
     kept = [t for t in tasks if not _is_solved(t.name, solved)]
     n_skipped = len(tasks) - len(kept)
     if n_skipped and not quiet:
         names = ", ".join(t.name for t in tasks if _is_solved(t.name, solved))
         print(f"Skipping {n_skipped} solved tasks ({names}); "
-              f"use --run-all to include them with web access disabled.")
+              f"drop --run-unsolved to run them with web access disabled.")
     return kept
 
 
@@ -450,7 +450,7 @@ DOCKER_SOLVER_PATH = "/solver"
 
 # Auth + solver-config env vars forwarded into Docker containers.
 _AUTH_ENV_VARS = [
-    # Set by --run-all; the solver scripts drop their web tools.
+    # Set unless --run-unsolved; the solver scripts drop their web tools.
     "VERO_DISABLE_WEB",
     # Claude Code
     "CLAUDE_CODE_OAUTH_TOKEN",
@@ -961,11 +961,12 @@ def main():
              "except seL4. ANDed with --tasks if both set.",
     )
     parser.add_argument(
-        "--run-all", action="store_true",
-        help="Include solved tasks (published under solved/) and disable "
-             "the agents' web tools (VERO_DISABLE_WEB=1). By default only "
-             "unsolved tasks run, with web access enabled: a published "
-             "solution could contaminate a web-enabled run.",
+        "--run-unsolved", action="store_true",
+        help="Run only the tasks with no published solution (under "
+             "solved/), with the agents' web tools enabled. By default "
+             "every task runs and the web tools are disabled "
+             "(VERO_DISABLE_WEB=1), which keeps the solved tasks in the "
+             "suite without a published solution being one search away.",
     )
     parser.add_argument(
         "--parallel", type=int, default=1,
@@ -1067,9 +1068,11 @@ def main():
 
     # The solver scripts read this and drop their web tools; Docker mode
     # forwards it via _AUTH_ENV_VARS.
-    if args.run_all:
+    if not args.run_unsolved:
         os.environ["VERO_DISABLE_WEB"] = "1"
-        print("Run-all mode: solved tasks included, agent web access disabled.")
+        print("All tasks included; agent web access disabled.")
+    else:
+        print("Unsolved tasks only; agent web access enabled.")
 
     if args.resume:
         if args.force:
@@ -1081,7 +1084,7 @@ def main():
         print("Resume mode: scanning previous results...")
         # Discover all tasks (need the full list to find which errored)
         tasks = build_task_list(bench_root, output_dir, task_filter, category_filter)
-        tasks = filter_solved_tasks(tasks, bench_root, args.run_all)
+        tasks = filter_solved_tasks(tasks, bench_root, args.run_unsolved)
         tasks = _find_resumable_tasks(tasks, bench_root)
         if not tasks:
             print("No ERROR tasks to resume. Exiting.")
@@ -1103,7 +1106,7 @@ def main():
 
         print("Phase 1: Discovering tasks...")
         tasks = build_task_list(bench_root, output_dir, task_filter, category_filter)
-        tasks = filter_solved_tasks(tasks, bench_root, args.run_all)
+        tasks = filter_solved_tasks(tasks, bench_root, args.run_unsolved)
         if not tasks:
             print("No tasks matched. Exiting.")
             return
@@ -1159,7 +1162,7 @@ def main():
         print(f"{label}: Running {len(tasks)} tasks (parallel={args.parallel}, "
               f"timeout={args.timeout}h, budget={budget_str}, "
               f"docker={'off' if args.no_docker else 'on'}, "
-              f"web={'off' if args.run_all else 'on'})...\n")
+              f"web={'on' if args.run_unsolved else 'off'})...\n")
 
         # Set once the fail counter crosses --abort-after consecutive solver
         # errors, or once any worker detects a rate-limit rejection; pending
@@ -1218,7 +1221,7 @@ def main():
             bench_root, output_dir, task_filter, category_filter,
         )
         full_tasks = filter_solved_tasks(
-            full_tasks, bench_root, args.run_all, quiet=True,
+            full_tasks, bench_root, args.run_unsolved, quiet=True,
         )
         tasks = _find_resumable_tasks(full_tasks, bench_root)
         if not tasks:

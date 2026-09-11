@@ -28,7 +28,7 @@ mkdir -p logs
 
 # `Skill` enables the pre-installed lean4 plugin; `Task` allows subagents;
 # WebFetch/WebSearch cover Mathlib lookups that leansearch/loogle miss.
-# VERO_DISABLE_WEB (run_bench.py --run-all) drops the web tools so
+# VERO_DISABLE_WEB (run_bench.py default) drops the web tools so
 # published solutions cannot be looked up.
 TOOLS="Bash,Edit,Read,Write,Glob,Grep,Skill,Task,TodoWrite"
 if [[ -z "${VERO_DISABLE_WEB:-}" ]]; then

@@ -14,6 +14,9 @@ TIMEOUT    ?= 2
 TASKS      ?=
 CATEGORIES ?=
 ARGS       ?=
+RUN_ID     ?=
+RUN_MODEL  ?=
+RUN_LABEL  ?=
 REPO_URL   ?= https://github.com/SunHao-0/Vero
 PORT       ?= 8000
 NETWORK    ?= host
@@ -22,7 +25,7 @@ IMAGE      := vero-lean4
 _filters := $(if $(TASKS),--tasks $(TASKS)) $(if $(CATEGORIES),--categories $(CATEGORIES))
 
 .DEFAULT_GOAL := help
-.PHONY: help gen list run run-all resume build analyze llm-check clean check-auth site serve
+.PHONY: help gen list run run-unsolved resume build analyze llm-check collect-run clean check-auth site serve
 
 help:
 	@grep -hE '^[a-z-]+:.*##' $(MAKEFILE_LIST) \
@@ -34,13 +37,13 @@ gen:  ## Instantiate lean template and produce tasks
 list: ## List all available tasks
 	$(PY) template/gen.py --list
 
-run: check-auth ## Run the benchmark (vars: SOLVER OUTPUT_DIR PARALLEL TIMEOUT TASKS CATEGORIES NETWORK ARGS)
+run: check-auth ## Run every task with agent web access disabled (vars: SOLVER OUTPUT_DIR PARALLEL TIMEOUT TASKS CATEGORIES NETWORK ARGS)
 	$(PY) scripts/run_bench.py --output-dir $(OUTPUT_DIR) --solver $(SOLVER) \
 	  --parallel $(PARALLEL) --timeout $(TIMEOUT) --docker-network "$(NETWORK)" $(_filters) $(ARGS)
 
-run-all: check-auth ## Run all tasks incl. solved ones, with agent web access disabled
+run-unsolved: check-auth ## Run only the unsolved tasks, with agent web access enabled
 	$(PY) scripts/run_bench.py --output-dir $(OUTPUT_DIR) --solver $(SOLVER) \
-	  --parallel $(PARALLEL) --timeout $(TIMEOUT) --docker-network "$(NETWORK)" --run-all $(_filters) $(ARGS)
+	  --parallel $(PARALLEL) --timeout $(TIMEOUT) --docker-network "$(NETWORK)" --run-unsolved $(_filters) $(ARGS)
 
 resume: check-auth ## Re-run only the ERROR tasks of a previous run in OUTPUT_DIR
 	$(PY) scripts/run_bench.py --output-dir $(OUTPUT_DIR) --solver $(SOLVER) \
@@ -56,6 +59,12 @@ analyze: ## Re-check and analyze the results in OUTPUT_DIR
 llm-check: SOLVER := scripts/claude_code.sh
 llm-check: check-auth ## LLM-review the PASS solutions in OUTPUT_DIR (isolated judge; ARGS='--force')
 	$(PY) scripts/llm_check.py $(OUTPUT_DIR) --parallel $(PARALLEL) $(ARGS)
+
+collect-run: ## Summarize OUTPUT_DIR into assets/runs/$(RUN_ID).json for the website
+	@[ -n "$(RUN_ID)" ] && [ -n "$(RUN_MODEL)" ] && [ -n "$(RUN_LABEL)" ] \
+	  || { echo "usage: make collect-run OUTPUT_DIR=... RUN_ID=opus5 RUN_MODEL=claude-opus-5 RUN_LABEL='Claude Opus 5'"; exit 1; }
+	$(PY) scripts/collect_runs.py $(OUTPUT_DIR) --id $(RUN_ID) \
+	  --model $(RUN_MODEL) --label "$(RUN_LABEL)" $(ARGS)
 
 site: ## Build the static website into site/ (pass REPO_URL=... for GitHub links)
 	$(PY) scripts/build_site.py --repo-url "$(REPO_URL)"

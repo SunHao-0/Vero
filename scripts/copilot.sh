@@ -93,7 +93,7 @@ FLAGS=(
 
 # URL fetches are a separate permission axis from tools; without
 # --allow-all-urls, --no-ask-user auto-denies them. VERO_DISABLE_WEB
-# (run_bench.py --run-all) omits the grant so published solutions
+# (run_bench.py default) omits the grant so published solutions
 # cannot be looked up.
 if [[ -z "${VERO_DISABLE_WEB:-}" ]]; then
     FLAGS+=(--allow-all-urls)

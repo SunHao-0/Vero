@@ -113,6 +113,7 @@ under `solved/TnumStepUp/`.
 │   ├── seL4/, eBPF/      # Hand-maintained task sources
 │   └── task_dir/         # Skeleton copied into each self-contained task dir
 ├── tasks/                # All tasks (make gen rebuilds all)
+├── assets/runs/          # Per-run summaries shown on the website
 └── solved/               # Published solutions
 ```
 
@@ -205,11 +206,13 @@ The full check (`check.sh`) runs five gates in order:
 
 ## Versioning and Task Liveness
 
-Solved tasks (published under `solved/`) are excluded from runs by default,
-because agents run with web access and could find the published solution.
+A published solution under `solved/` is one web search away, so a run
+either drops the solved tasks or takes away the web.
 
-`--run-all` (or `make run-all`) includes them and instead *disables* the
-agents' web tools (`VERO_DISABLE_WEB=1`, honored by both bundled solvers).
+By default every task runs and the agents' web tools are *disabled*
+(`VERO_DISABLE_WEB=1`, honored by both bundled solvers). `--run-unsolved`
+(or `make run-unsolved`) runs only the tasks with no published solution
+and leaves the web tools enabled.
 
 ## Running Benchmarks
 
@@ -233,11 +236,11 @@ Some options (see `--help` for the full list):
 
 - `--tasks` / `--categories`: operator globs (`cnum_*`, `kb_udiv`) and
   area filter (`eBPF,LLVM,seL4`); ANDed when both are set.
-- `--run-all`: include solved tasks, disable agent web access.
+- `--run-unsolved`: run only unsolved tasks, with agent web access.
 - `--timeout` (hours, hard) and `--max-budget-usd` (soft): per-task budget.
 - `--resume`: re-run only ERROR tasks (solver crash or infrastructure
   failure) from a clean task state; PASS, FAIL, and TIMEOUT are results
-  and are not retried. Repeat `--run-all` when resuming such a run.
+  and are not retried. Repeat `--run-unsolved` when resuming such a run.
 
 For each task the runner fetches the Mathlib cache, runs the solver,
 restores the protected files, and runs `check.sh`; the result is
