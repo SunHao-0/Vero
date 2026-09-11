@@ -170,7 +170,8 @@ def excluded(name: str, names) -> bool:
 
 
 def collect(run_dir: Path, drop=()):
-    tasks, starts = {}, []
+    """Task records, plus the wall-clock span the run covers."""
+    tasks, stamps = {}, []
     for d in task_dirs(run_dir):
         if excluded(d.name, drop):
             print(f"excluding {d.name}")
@@ -190,13 +191,13 @@ def collect(run_dir: Path, drop=()):
         meta_file = d / "logs" / "meta.json"
         if meta_file.exists():
             try:
-                start = json.loads(meta_file.read_text()).get("start_time")
+                meta = json.loads(meta_file.read_text())
             except (json.JSONDecodeError, OSError):
-                start = None
-            if start:
-                starts.append(start)
+                meta = {}
+            stamps += [t for t in (meta.get("start_time"), meta.get("end_time"))
+                       if t]
         tasks[d.name] = entry
-    return tasks, min(starts) if starts else None
+    return tasks, (min(stamps), max(stamps)) if stamps else (None, None)
 
 
 def main():
@@ -216,20 +217,24 @@ def main():
     ap.add_argument("--out", default=str(RUNS_DIR))
     args = ap.parse_args()
 
-    tasks, started = collect(Path(args.run_dir).resolve(), args.exclude)
+    tasks, (started, ended) = collect(Path(args.run_dir).resolve(), args.exclude)
     if not tasks:
         raise SystemExit(f"no task results under {args.run_dir}")
-    date = args.date
-    if not date and started:
+
+    def as_date(stamp):
         try:
-            date = datetime.fromisoformat(started).astimezone(
+            return datetime.fromisoformat(stamp).astimezone(
                 timezone.utc).date().isoformat()
-        except ValueError:
-            date = None
+        except (TypeError, ValueError):
+            return None
+
+    # A suite run spans days, sometimes machines; report both ends of it.
+    date = args.date or as_date(started)
+    date_end = as_date(ended) if not args.date else None
 
     run = {"id": args.id, "model": args.model, "label": args.label,
-           "agent": args.agent, "date": date, "limit_s": args.limit_s,
-           "tasks": tasks}
+           "agent": args.agent, "date": date, "date_end": date_end,
+           "limit_s": args.limit_s, "tasks": tasks}
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{args.id}.json"

@@ -365,6 +365,12 @@ def fmt_date(d):
         return d
 
 
+def fmt_span(run):
+    """A run's dates: a single day, or the span it actually covered."""
+    start, end = fmt_date(run.get("date")), fmt_date(run.get("date_end"))
+    return f"{start} \u2013 {end}" if end and end != start else start
+
+
 def traj_svg(rec):
     """Activity profile: one stacked column per time bucket of the run."""
     traj = rec.get("traj")
@@ -446,7 +452,7 @@ def run_card(run, rec, published):
                 f'token totals are unknown and its cost is an upper bound: '
                 f'this much wall clock at the highest rate the run reached '
                 f'elsewhere. The tool calls below are exact.</p>')
-    meta = " \u00b7 ".join(x for x in (run.get("agent"), fmt_date(run.get("date")))
+    meta = " \u00b7 ".join(x for x in (run.get("agent"), fmt_span(run))
                           if x)
     return f"""
 <div class=runcard>
@@ -469,8 +475,9 @@ def run_card(run, rec, published):
 PAGES = {"about", "problems"}
 
 
-def page(title, body, depth, repo_url, active=""):
-    """Wrap body in the shared shell. `depth` = path depth for relative links."""
+def page(title, body, depth, repo_url, active="", landing=False):
+    """Wrap body in the shared shell. `depth` = path depth for relative links.
+    `landing` switches <main> to the roomier rhythm the front page uses."""
     root = "../" * depth
     def nav(href, label, key):
         if key not in PAGES:
@@ -496,7 +503,7 @@ def page(title, body, depth, repo_url, active=""):
     {repo_link}
   </nav>
 </header>
-<main>
+<main class="{'landing' if landing else ''}">
 {body}
 </main>
 <footer>
@@ -628,7 +635,8 @@ PRINCIPLES = [
      "optimal</strong>, a bar the verifier's current operators miss."),
     ("Valuable to solve",
      "A correct solution is an upstream contribution, not just a benchmark "
-     "score.",
+     "score: the specifications encode changes the projects want and do not "
+     "yet have.",
      "The tnum_step() solution is <strong>merged into</strong> the Linux "
      "kernel."),
 ]
@@ -638,8 +646,8 @@ AREA_CARDS = [
      "Sound and optimal abstract operators for the Linux kernel eBPF "
      "verifier, over the cnum and interval domains."),
     ("LLVM", "llvm.png",
-     "Optimal KnownBits and DemandedBits transfer functions, the forward "
-     "and backward bit-level analyses the optimizer relies on."),
+     "Optimal KnownBits and DemandedBits transfer functions: the bit-level "
+     "analyses the optimizer relies on."),
     ("seL4", "seL4.png",
      "Verified optimizations of seL4 microkernel routines, specified "
      "against the kernel's data-structure invariants."),
@@ -718,7 +726,7 @@ def render_about(tasks, runs, repo_url):
     solved = sum(1 for t in tasks if t["status"] != "open")
     published = sum(1 for t in tasks if t["status"] == "published")
 
-    # The two countable tiles are links into the board they summarize.
+    # Counted tiles link into the board they summarize.
     stats = "".join(
         (f'<a class=stat-tile href="{href}">' if href else '<div class=stat-tile>')
         + f'<div class=stat-num>{esc(num)}</div>'
@@ -728,24 +736,26 @@ def render_about(tasks, runs, repo_url):
             (str(len(tasks)), "tasks", "problems.html"),
             (str(len(by_area)), "real systems", ""),
             (str(solved), "solved by an agent", "problems.html?status=solved"),
+            (str(published), "solutions published", "problems.html?status=published"),
         ])
 
     principle_cards = "".join(
-        f'<div class=card><h3>{esc(title)}</h3><p>{esc(sent)}</p>'
-        f'<p class=ex>Example: {ex}</p></div>'
-        for title, sent, ex in PRINCIPLES)
+        f'<div class=card><div class=kicker>{i:02d}</div>'
+        f'<h3>{esc(title)}</h3><p>{esc(sent)}</p>'
+        f'<p class=ex>{ex}</p></div>'
+        for i, (title, sent, ex) in enumerate(PRINCIPLES, 1))
 
     area_cards = "".join(
-        f'<a class="card alink" href="problems.html?area={name}">'
+        f'<a class="card alink areacard" href="problems.html?area={name}">'
         f'<div class=arealogo>'
-        f'<img src="assets/logos/{logo}" alt="{esc(name)} logo">'
-        f'<span class=areacount>{by_area.get(name, 0)} tasks</span></div>'
+        f'<img src="assets/logos/{logo}" alt="{esc(name)} logo"></div>'
         f'<p>{esc(desc)}</p>'
-        f'<p class=browse>Browse {esc(name)} tasks &rarr;</p></a>'
+        f'<p class=browse><span class=areacount>{by_area.get(name, 0)} tasks</span>'
+        f'<span class=go>Browse &rarr;</span></p></a>'
         for name, logo, desc in AREA_CARDS)
 
     published_rows = "".join(
-        f'<tr><td><a href="problems/{d}.html">{esc(n)}</a></td>'
+        f'<tr><td class=ttl><a href="problems/{d}.html">{esc(n)}</a></td>'
         f'<td>{badge(a, "area-" + a)}</td>'
         f'<td>{esc(model_label(m, runs))}</td><td>{esc(h)}</td></tr>'
         for d, n, a, m, h in PUBLISHED)
@@ -761,82 +771,118 @@ def render_about(tasks, runs, repo_url):
         run_line = (
             f'<p>The suite was run once with '
             f'<strong>{esc(r.get("label"))}</strong> on '
-            f'{esc(fmt_date(r.get("date")))}, one attempt per task under a '
+            f'{esc(fmt_span(r))}, one attempt per task under a '
             f'{esc(fmt_dur(r.get("limit_s")))} cap: it solved '
             f'<strong>{st["solved"]} of the {st["n"]} tasks it ran</strong>, at '
             f'an average of {esc(fmt_dur(st["avg_time"]))} and '
             f'{esc(fmt_usd(st["avg_cost"]))} per solved task, for {esc(total)} '
-            f'of API spend in total. '
-            f'<a href="results.html">Full results, cost, and what the agent did '
-            f'&rarr;</a></p>')
+            f'of API spend in total.</p>'
+            f'<p class=cta><a class="btn primary" href="results.html">'
+            f'Full results and cost</a>'
+            f'<a class=btn href="problems.html?status=solved">'
+            f'Solved tasks</a></p>')
 
     body = f"""
-<section class=prose>
-<h1>About</h1>
-<p>Vero evaluates coding agents on verified code generation: given a formal
-specification, the agent must produce an implementation together with a Lean 4
-proof that the implementation satisfies it. The proof checker decides
-correctness, so reviewing a solution reduces to reading a concise
-specification.</p>
+<section class=hero>
+  <p class=eyebrow>The Vero benchmark</p>
+  <h1>Verified code generation on real systems</h1>
+  <p class=lede>Given a formal specification, a coding agent must produce an
+  implementation <em>and</em> a Lean 4 proof that the implementation satisfies
+  it. The proof checker decides correctness, so reviewing a solution reduces to
+  reading a concise specification.</p>
+  <p class=cta>
+    <a class="btn primary" href="problems.html">Browse the problems</a>
+    <a class="btn" href="results.html">See the results</a>
+  </p>
+  <div class=stats>{stats}</div>
+</section>
 
-<div class=stats>{stats}</div>
+<section>
+  <p class=eyebrow>Anatomy</p>
+  <h2>What a task looks like</h2>
+  <p class=sublede>Each task is a single Lean file, split into sections the
+  solver may edit and sections it may not, plus the checker that decides the
+  outcome.</p>
+  <div class=figure>{ANATOMY_SVG}</div>
+</section>
 
-<div class=figure>{ANATOMY_SVG}</div>
+<section>
+  <p class=eyebrow>Principles</p>
+  <h2>What makes a Vero task</h2>
+  <div class=cards>{principle_cards}</div>
+</section>
 
-<h2>Principles</h2>
-<div class=cards>{principle_cards}</div>
+<section>
+  <p class=eyebrow>Coverage</p>
+  <h2>Three systems, {len(tasks)} tasks</h2>
+  <div class=cards>{area_cards}</div>
+</section>
 
-<h2>Three areas, {len(tasks)} tasks</h2>
-<div class=cards>{area_cards}</div>
+<section>
+  <p class=eyebrow>Results</p>
+  <h2>How agents do</h2>
+  {run_line}
+  <h3>Published solutions</h3>
+  <p class=sublede>{published} solutions are published in full, one per area.
+  The rest of the solved tasks are under review; each is released once it has
+  been read and checked.</p>
+  <div class=tablewrap>
+  <table class=results>
+  <thead><tr><th>Solution</th><th>Area</th><th>Model</th><th>Highlight</th></tr></thead>
+  <tbody>{published_rows}</tbody>
+  </table>
+  </div>
+</section>
 
-<h2>Results</h2>
-{run_line}
+<section>
+  <p class=eyebrow>Upstream</p>
+  <h2>In the Linux kernel</h2>
+  <p class=sublede>The agent-written <code>tnum_step()</code> is
+  <a href="{KERNEL_COMMIT_URL}">merged into the Linux kernel</a>, and it is
+  provably correct: the Lean 4 proof machine-checks the soundness and
+  optimality of the exact algorithm the C code implements.</p>
+  <div class=duo>
+    <div class=panel>
+      <div class=phead>Lean 4 <span class=ptag>algorithm, spec, proof</span></div>
+      <pre class=code>{hl(merged_lean(), "lean")}</pre>
+      <div class=pfoot>Five obligations, each closed by a machine-checked proof.</div>
+    </div>
+    <div class=panel>
+      <div class=phead>C <span class=ptag>kernel/bpf/tnum.c</span></div>
+      <pre class=code>{hl(merged_c(), "c")}</pre>
+      <div class=pfoot><a href="{KERNEL_COMMIT_URL}">bpf-next commit 833ef4a954e1</a></div>
+    </div>
+  </div>
+</section>
 
-<h3>Published solutions</h3>
-<p>{published} solutions are published in full, one per area. The rest of the
-solved tasks are under review; each solution is released once it has been read
-and checked.</p>
-<table class=results>
-<thead><tr><th>Solution</th><th>Area</th><th>Model</th><th>Highlight</th></tr></thead>
-<tbody>{published_rows}</tbody>
-</table>
-
-<h3>In the Linux kernel</h3>
-<p>The agent-written <code>tnum_step()</code> is
-<a href="{KERNEL_COMMIT_URL}">merged into the Linux kernel</a>, and it is
-<strong>provably correct</strong>: the Lean 4 proof on the left machine-checks
-the soundness and optimality of the exact algorithm that the C code on the
-right implements.</p>
-<div class=duo>
-<div class=panel>
-  <div class=phead>Lean 4 &mdash; algorithm, specification, proof</div>
-  <pre class=code>{hl(merged_lean(), "lean")}</pre>
-  <div class=pfoot>Five obligations, each closed by a machine-checked proof.</div>
-</div>
-<div class=panel>
-  <div class=phead>C &mdash; as merged in <code>kernel/bpf/tnum.c</code></div>
-  <pre class=code>{hl(merged_c(), "c")}</pre>
-  <div class=pfoot><a href="{KERNEL_COMMIT_URL}">bpf-next commit 833ef4a954e1</a></div>
-</div>
-</div>
-
-<h2>Borrow a problem</h2>
-<p>Every problem page bundles its specification, instruction, and Lake project
-files for download; start from the editable sections. Contributions are
-welcome: a new task from a real system, a sharper specification, or a solution
-to an open problem.</p>
-
-<h2>Authors</h2>
-<ul>
-<li>eBPF tasks: Hao Sun</li>
-<li>LLVM tasks: Cong Li</li>
-<li>seL4 tasks: Zenan Li</li>
-</ul>
-<p class=trademark>The eBPF, LLVM, and seL4 logos identify the upstream
-projects and are trademarks of their respective owners.</p>
+<section class=closing>
+  <div class=cards>
+    <div class=card>
+      <h3>Borrow a problem</h3>
+      <p>Every problem page bundles its specification, instruction, and Lake
+      project files for download. Start from the editable sections.</p>
+      <p class=browse><a class=arrow href="problems.html">Open the board</a></p>
+    </div>
+    <div class=card>
+      <h3>Contribute</h3>
+      <p>A new task from a real system, a sharper specification, or a solution
+      to an open problem &mdash; all welcome.</p>
+      <p class=browse><a class=arrow href="{repo_url}">The repository</a></p>
+    </div>
+    <div class=card>
+      <h3>Authors</h3>
+      <ul class=authors>
+        <li>{badge("eBPF", "area-eBPF")} Hao Sun</li>
+        <li>{badge("LLVM", "area-LLVM")} Cong Li</li>
+        <li>{badge("seL4", "area-seL4")} Zenan Li</li>
+      </ul>
+    </div>
+  </div>
+  <p class=trademark>The eBPF, LLVM, and seL4 logos identify the upstream
+  projects and are trademarks of their respective owners.</p>
 </section>
 """
-    return page("Vero: About", body, 0, repo_url, "about")
+    return page("Vero: About", body, 0, repo_url, "about", landing=True)
 
 
 def outcome_bars(rows):
@@ -974,7 +1020,7 @@ def render_results(tasks, runs, repo_url):
                  else fmt_usd(st["recorded"]))
         run_rows += (
             f'<tr><td class=ttl>{esc(r.get("label") or r.get("model"))}{tag}</td>'
-            f'<td>{esc(fmt_date(r.get("date")))}</td>'
+            f'<td>{esc(fmt_span(r))}</td>'
             f'<td class=numv>{st["n"]}</td>'
             f'<td class=numv>{solved}</td>'
             f'<td class=numv>{esc(fmt_dur(st["avg_time"]))}</td>'
@@ -1024,7 +1070,7 @@ def render_results(tasks, runs, repo_url):
                 f'{esc(fmt_usd(st["bounded"]))} bound comes from.</p>')
         sections.append(f"""
 <h2>{esc(run.get("label") or run.get("model"))}</h2>
-<p>{esc(run.get("agent"))}, {esc(fmt_date(run.get("date")))}. One attempt per
+<p>{esc(run.get("agent"))}, {esc(fmt_span(run))}. One attempt per
 task, no human help, {esc(fmt_dur(run.get("limit_s")))} of wall clock per task.
 {st["n"]} of the {len(tasks)} tasks were run.</p>
 <div class=stats>{tiles}</div>
@@ -1349,15 +1395,17 @@ STYLE = """/* Vero site. Conservative CSS (no grid, no custom properties) so it
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
 body {
-  margin: 0; color: #1a1a1a; background: #fff;
-  font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  margin: 0; color: #14171a; background: #fff;
+  font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 a { color: #1a4fa0; text-decoration: none; }
 a:hover { text-decoration: underline; }
 main { max-width: 900px; margin: 0 auto; padding: 0 20px 64px; }
 
 .topbar {
-  border-bottom: 1px solid #e6e6e6; background: #fff;
+  border-bottom: 1px solid #ececef; background: #fff;
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 20px; max-width: 900px; margin: 0 auto;
 }
@@ -1366,9 +1414,73 @@ main { max-width: 900px; margin: 0 auto; padding: 0 20px 64px; }
 .topbar nav a.active { color: #111; font-weight: 600; }
 
 .hero { padding: 28px 0 8px; border-bottom: 1px solid #eee; margin-bottom: 20px; }
-.hero h1 { font-size: 26px; margin: 0 0 10px; line-height: 1.25; }
+.hero h1 { font-size: 26px; margin: 0 0 10px; line-height: 1.25;
+  letter-spacing: -.02em; }
 .hero p { color: #333; margin: 8px 0; }
 .hero .stat { color: #555; font-size: 14px; }
+
+/* --- Landing page. Roomier rhythm, a mono eyebrow over every section, and
+   cards that line up on a single baseline. ---------------------------------- */
+.landing section { padding: 44px 0 0; }
+.landing section + section { border-top: 1px solid #f0f0f2; }
+.landing .eyebrow { margin: 0 0 6px; color: #1a4fa0; font-size: 11px;
+  font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.landing h1 { font-size: 40px; line-height: 1.12; letter-spacing: -.025em;
+  margin: 0 0 14px; }
+.landing h2 { font-size: 23px; line-height: 1.25; letter-spacing: -.015em;
+  border: 0; padding: 0; margin: 0 0 8px; }
+.landing h3 { font-size: 15px; margin: 26px 0 6px; }
+.landing .lede { font-size: 17px; line-height: 1.6; color: #43474d;
+  max-width: 640px; margin: 0 0 20px; }
+.landing .sublede { color: #55595f; margin: 0 0 14px; max-width: 660px; }
+.landing .hero { border: 0; padding: 40px 0 4px; margin: 0; }
+.landing p { color: #33373d; }
+
+.cta { margin: 0 0 24px; }
+.btn { display: inline-block; margin: 0 8px 8px 0; padding: 9px 16px;
+  border: 1px solid #d8dade; border-radius: 8px; background: #fff;
+  color: #24272c; font-size: 14px; font-weight: 600; }
+.btn:hover { text-decoration: none; border-color: #1a4fa0; color: #1a4fa0; }
+.btn.primary { background: #1a4fa0; border-color: #1a4fa0; color: #fff; }
+.btn.primary:hover { background: #16437f; border-color: #16437f; color: #fff; }
+
+a.arrow { font-weight: 600; }
+a.arrow:after { content: " \\2192"; }
+
+.landing .card { border-radius: 12px; padding: 16px 18px 14px;
+  background: #fff; border-color: #e9eaed; display: flex;
+  flex-direction: column; }
+.landing .card h3 { margin: 0 0 6px; font-size: 15.5px; letter-spacing: -.01em; }
+.landing .card p { font-size: 14px; color: #4a4e54; margin: 0 0 8px; }
+.landing .card .ex { margin-top: auto; padding-top: 10px; font-size: 12.5px;
+  color: #6a6f76; border-top: 1px solid #f0f0f2; }
+.kicker { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px; font-weight: 700; color: #aeb3ba; letter-spacing: .08em;
+  margin-bottom: 6px; }
+
+.areacard .arealogo { height: 30px; margin: 2px 0 12px; }
+.areacard .arealogo img { height: 28px; width: auto; max-width: 60%; }
+.areacard .browse { display: flex; align-items: center;
+  justify-content: space-between; margin-top: auto; padding-top: 10px;
+  border-top: 1px solid #f0f0f2; }
+.areacard .areacount { float: none; margin: 0; font-size: 12px; }
+.areacard .go { color: #1a4fa0; font-size: 13px; font-weight: 600; }
+
+.landing .figure { margin: 10px 0 4px; border: 1px solid #e9eaed;
+  border-radius: 12px; background: #fbfbfc; padding: 14px 16px; }
+.landing .duo { margin: 8px -6px 0; }
+.landing .panel { border-radius: 12px; border-color: #e9eaed; }
+.landing .panel pre.code { max-height: 380px; overflow: auto; }
+.ptag { float: right; font-weight: 500; color: #8b9099;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11.5px; }
+.landing .results { margin-top: 4px; }
+.closing .card p:last-child { margin-bottom: 0; }
+ul.authors { list-style: none; padding: 0; margin: 0; font-size: 14px; }
+ul.authors li { margin: 6px 0; color: #33373d; }
+ul.authors .badge { margin-right: 8px; }
+.landing .trademark { margin: 24px 0 0; }
 
 .controls { display: flex; align-items: center; justify-content: space-between;
   margin: 18px 0 12px; flex-wrap: wrap; }
@@ -1405,7 +1517,8 @@ td.grp { color: #666; }
 .status.published { background: #1f7a37; color: #fff; }
 
 .crumb { color: #888; font-size: 13px; margin: 18px 0 4px; }
-.probhead h1 { font-size: 24px; margin: 4px 0 10px; line-height: 1.25; }
+.probhead h1 { font-size: 25px; margin: 4px 0 10px; line-height: 1.25;
+  letter-spacing: -.02em; }
 .badges .badge, .badges .status { margin-right: 6px; }
 .probid { color: #aaa; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 12px; margin-top: 8px; }
@@ -1445,18 +1558,22 @@ details summary { cursor: pointer; font-weight: 600; color: #333; padding: 6px 0
 .callout { background: #eef4ff; border: 1px solid #cddffb; border-radius: 8px;
   padding: 14px 16px; color: #234; margin: 14px 0; }
 
-.prose h1 { font-size: 24px; }
+.prose h1 { font-size: 26px; letter-spacing: -.02em; }
 .prose p, .prose li { color: #333; }
 .figure { margin: 20px 0; }
 .figure svg { max-width: 100%; height: auto; display: block; }
 
-.stats { display: flex; flex-wrap: wrap; margin: 18px -6px 6px; }
-.stat-tile { display: block; flex: 1 1 120px; margin: 6px; text-align: center;
-  border: 1px solid #e6e6e6; border-radius: 8px; padding: 12px 8px; background: #fafbfc; }
+.stats { display: flex; flex-wrap: wrap; margin: 20px -6px 6px; }
+.stat-tile { display: block; flex: 1 1 120px; margin: 6px;
+  border: 1px solid #e9eaed; border-radius: 12px; padding: 14px 16px;
+  background: #fbfbfc; }
 a.stat-tile { color: inherit; }
-a.stat-tile:hover { text-decoration: none; border-color: #1a4fa0; background: #f7f9fc; }
-.stat-num { font-size: 26px; font-weight: 700; color: #1a4fa0; line-height: 1.2; }
-.stat-label { font-size: 12px; color: #666; margin-top: 2px; }
+a.stat-tile:hover { text-decoration: none; border-color: #1a4fa0;
+  background: #f6f9fe; }
+.stat-num { font-size: 28px; font-weight: 700; color: #14171a; line-height: 1.15;
+  letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.stat-label { font-size: 11px; color: #6a6f76; margin-top: 4px;
+  letter-spacing: .07em; text-transform: uppercase; font-weight: 600; }
 
 .cards { display: flex; flex-wrap: wrap; margin: 12px -6px; }
 .card { flex: 1 1 240px; margin: 6px; border: 1px solid #e6e6e6;
@@ -1527,6 +1644,14 @@ table.results { width: 100%; border-collapse: collapse; font-size: 14px; margin:
 
 footer { border-top: 1px solid #eee; color: #999; font-size: 13px;
   max-width: 900px; margin: 0 auto; padding: 20px; }
+
+/* Phone: the hero headline and the section rhythm come down a step. */
+@media (max-width: 560px) {
+  .landing h1 { font-size: 30px; }
+  .landing .lede { font-size: 16px; }
+  .landing section { padding-top: 32px; }
+  .landing h2 { font-size: 21px; }
+}
 """
 
 APP_JS = """// Progressive enhancement: client-side search and area filter on the index.
