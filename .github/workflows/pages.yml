@@ -1,5 +1,4 @@
 # Build the static site from tasks/ and solved/ and deploy it to GitHub Pages.
-# Enable Pages for the repo with "Source: GitHub Actions".
 name: Deploy site
 
 on:
@@ -30,6 +29,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+      - uses: actions/configure-pages@v5
       - run: python3 scripts/build_site.py --repo-url "${{ github.server_url }}/${{ github.repository }}"
       - uses: actions/upload-pages-artifact@v3
         with:
