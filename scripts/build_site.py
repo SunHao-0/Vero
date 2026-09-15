@@ -346,6 +346,15 @@ def fmt_usd0(v):
     return f"${v:,.0f}" if v else DASH
 
 
+_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven",
+          "eight", "nine")
+
+
+def spell(n):
+    """Small counts read better spelled out in a sentence."""
+    return _WORDS[n] if 0 <= n < len(_WORDS) else str(n)
+
+
 def fmt_count(n):
     if n is None:
         return DASH
@@ -1028,6 +1037,26 @@ def render_results(tasks, runs, repo_url):
             f'<td class=numv>{esc(fmt_usd(st["recorded"]))}</td>'
             f'<td class=numv>{total}</td></tr>')
 
+    # "partial" on its own reads as if the model had attempted only that many
+    # tasks. One line of provenance is enough. The second sentence is guarded
+    # on the run actually skipping the published tasks, so it cannot go stale
+    # once some later run does cover them.
+    notes = []
+    for r in runs:
+        npub = sum(1 for p in PUBLISHED if p[3] == r.get("model"))
+        if npub and r not in charted:
+            notes.append(
+                f'{esc(r.get("label") or r.get("model"))} solved the '
+                f'{spell(npub)} published tasks; the run data here covers the '
+                f'{spell(stats[r["id"]]["n"])} whose transcript is published.')
+    for r in charted:
+        seen = {t["name"] for t, _ in covered[r["id"]]}
+        if PUBLISHED and not any(p[0] in seen for p in PUBLISHED):
+            notes.append(
+                f'The {esc(r.get("label") or r.get("model"))} run filters those '
+                f'out, leaving {stats[r["id"]]["n"]}.')
+    note_html = (f'<p class=hint>{" ".join(notes)}</p>' if notes else "")
+
     sections = []
     for run in charted:
         st = stats[run["id"]]
@@ -1153,9 +1182,10 @@ build, and no added axioms. Cost and time are what the run itself reported.</p>
 <p class=hint>A run killed at the cap writes no final cost record. Dropping
 those would understate what a model spent, since the longest runs are the ones
 that get killed, so the last column bounds each of them by its wall clock at
-the highest cost rate that same run reached. Runs marked <em>partial</em>
-covered only part of the suite and are listed for provenance, not for
-comparison.</p>
+the highest cost rate that same run reached. A run marked
+<em>partial</em> covered only part of the suite, so its solve count is
+provenance, not a score.</p>
+{note_html}
 
 {''.join(sections)}
 
