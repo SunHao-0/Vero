@@ -1010,6 +1010,17 @@ def render_results(tasks, runs, repo_url):
                          if run["id"] == r["id"]] for r in runs}
     stats = {r["id"]: run_stats([rec for _, rec in covered[r["id"]]])
              for r in runs}
+    # A run published only as totals (e.g. the paper's evaluation) states how
+    # many tasks it ran and what the whole run cost; its per-task records cover
+    # just the tasks whose numbers were published individually.
+    for r in runs:
+        summ = r.get("summary")
+        if summ:
+            st = stats[r["id"]]
+            st["n"] = summ["n"]
+            st["rate"] = round(100 * st["solved"] / summ["n"])
+            st["recorded"] = st["bounded"] = summ["cost_usd"]
+            st["unpriced"] = 0
     charted = [r for r in runs if len(covered[r["id"]]) >= MIN_CHART_TASKS]
 
     # The run table is the comparison: same tasks, same cap, same accounting
@@ -1021,7 +1032,7 @@ def render_results(tasks, runs, repo_url):
         # A run over a handful of tasks has a solve rate, but not one that
         # means anything next to a full-suite run; say so instead of printing
         # a percentage that invites the comparison.
-        partial = r not in charted
+        partial = st["n"] < MIN_CHART_TASKS
         tag = ' <span class=badge>partial</span>' if partial else ""
         solved = (f'{st["solved"]} of {st["n"]}' if partial
                   else f'{st["solved"]} ({st["rate"]}%)')
@@ -1037,29 +1048,11 @@ def render_results(tasks, runs, repo_url):
             f'<td class=numv>{esc(fmt_usd(st["recorded"]))}</td>'
             f'<td class=numv>{total}</td></tr>')
 
-    # "partial" on its own reads as if the model had attempted only that many
-    # tasks. One line of provenance is enough. The second sentence is guarded
-    # on the run actually skipping the published tasks, so it cannot go stale
-    # once some later run does cover them.
-    notes = []
-    for r in runs:
-        npub = sum(1 for p in PUBLISHED if p[3] == r.get("model"))
-        if npub and r not in charted:
-            nolog = sum(1 for _, rec in covered[r["id"]] if not rec.get("tools"))
-            msg = (f'{esc(r.get("label") or r.get("model"))} solved the '
-                   f'{spell(npub)} published tasks.')
-            if nolog:
-                msg += (f' Time and cost for {spell(nolog)} of them are taken '
-                        f'from the paper, so their turn and tool counts are '
-                        f'blank.')
-            notes.append(msg)
-    for r in charted:
-        seen = {t["name"] for t, _ in covered[r["id"]]}
-        if PUBLISHED and not any(p[0] in seen for p in PUBLISHED):
-            notes.append(
-                f'The {esc(r.get("label") or r.get("model"))} run filters those '
-                f'out, leaving {stats[r["id"]]["n"]}.')
-    note_html = (f'<p class=hint>{" ".join(notes)}</p>' if notes else "")
+
+    partial_hint = (" Runs marked <em>partial</em> covered only part of the "
+                    "suite and are listed for provenance, not for comparison."
+                    if any(st["n"] < MIN_CHART_TASKS for st in stats.values())
+                    else "")
 
     sections = []
     for run in charted:
@@ -1118,9 +1111,9 @@ took.</p>
 """)
 
     # Per-task rows, every run in one table.
-    multi = len(runs) > 1
+    multi = len(charted) > 1
     rows = []
-    for run in runs:
+    for run in charted or runs:
         rate = stats[run["id"]]["cost_rate"]
         label = run.get("label") or run.get("model")
         for t, rec in sorted(covered[run["id"]],
@@ -1186,10 +1179,7 @@ build, and no added axioms. Cost and time are what the run itself reported.</p>
 <p class=hint>A run killed at the cap writes no final cost record. Dropping
 those would understate what a model spent, since the longest runs are the ones
 that get killed, so the last column bounds each of them by its wall clock at
-the highest cost rate that same run reached. A run marked
-<em>partial</em> covered only part of the suite, so its solve count is
-provenance, not a score.</p>
-{note_html}
+the highest cost rate that same run reached.{partial_hint}</p>
 
 {''.join(sections)}
 
