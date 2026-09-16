@@ -445,8 +445,8 @@ def run_card(run, rec, published):
              ("Cost", ("\u2264 " + fmt_usd(cost)) if est else fmt_usd(cost)),
              ("Turns", str(rec.get("turns") or DASH)),
              ("Tool calls", str(rec.get("tool_calls") or DASH)),
-             ("Compiles", str(tools.get("compile", 0))),
-             ("check.sh runs", str(tools.get("check", 0))),
+             ("Compiles", str(tools.get("compile", 0) if tools else DASH)),
+             ("check.sh runs", str(tools.get("check", 0) if tools else DASH)),
              ("Output tokens", fmt_count(tokens["out"] if tokens else None))]
     tiles = "".join(f'<div class=runstat><div class=rs-num>{esc(v)}</div>'
                     f'<div class=rs-label>{esc(k)}</div></div>'
@@ -1045,10 +1045,14 @@ def render_results(tasks, runs, repo_url):
     for r in runs:
         npub = sum(1 for p in PUBLISHED if p[3] == r.get("model"))
         if npub and r not in charted:
-            notes.append(
-                f'{esc(r.get("label") or r.get("model"))} solved the '
-                f'{spell(npub)} published tasks; the run data here covers the '
-                f'{spell(stats[r["id"]]["n"])} whose transcript is published.')
+            nolog = sum(1 for _, rec in covered[r["id"]] if not rec.get("tools"))
+            msg = (f'{esc(r.get("label") or r.get("model"))} solved the '
+                   f'{spell(npub)} published tasks.')
+            if nolog:
+                msg += (f' Time and cost for {spell(nolog)} of them are taken '
+                        f'from the paper, so their turn and tool counts are '
+                        f'blank.')
+            notes.append(msg)
     for r in charted:
         seen = {t["name"] for t, _ in covered[r["id"]]}
         if PUBLISHED and not any(p[0] in seen for p in PUBLISHED):
@@ -1114,9 +1118,9 @@ took.</p>
 """)
 
     # Per-task rows, every run in one table.
-    multi = len(charted) > 1
+    multi = len(runs) > 1
     rows = []
-    for run in charted or runs:
+    for run in runs:
         rate = stats[run["id"]]["cost_rate"]
         label = run.get("label") or run.get("model")
         for t, rec in sorted(covered[run["id"]],
@@ -1140,8 +1144,8 @@ took.</p>
                 f'<td class=numv>{esc(fmt_dur(rec.get("elapsed_s")))}</td>'
                 f'<td class=numv>{cell}</td>'
                 f'<td class=numv>{rec.get("turns") or DASH}</td>'
-                f'<td class=numv>{tools.get("compile", 0)}</td>'
-                f'<td class=numv>{tools.get("check", 0)}</td></tr>')
+                f'<td class=numv>{tools.get("compile", 0) if tools else DASH}</td>'
+                f'<td class=numv>{tools.get("check", 0) if tools else DASH}</td></tr>')
 
     controls = """
 <div class=controls>
