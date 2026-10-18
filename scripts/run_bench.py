@@ -408,7 +408,9 @@ def build_docker_image(bench_root: Path) -> None:
 
     Passes the current user's UID/GID as build args so the in-container
     solver user matches the host user. This avoids chmod 777 hacks and
-    ensures bind-mounted files have correct ownership.
+    ensures bind-mounted files have correct ownership. CLI_CACHE_BUST
+    makes Docker re-resolve the agent CLIs' @latest instead of reusing a
+    cached layer with outdated versions.
     """
     dockerfile = bench_root / DOCKERFILE
     if not dockerfile.exists():
@@ -422,6 +424,7 @@ def build_docker_image(bench_root: Path) -> None:
             "-f", str(dockerfile),
             "--build-arg", f"SOLVER_UID={uid}",
             "--build-arg", f"SOLVER_GID={gid}",
+            "--build-arg", f"CLI_CACHE_BUST={int(time.time())}",
             "-t", DOCKER_IMAGE, str(bench_root),
         ],
         check=True,

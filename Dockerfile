@@ -25,7 +25,6 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g @anthropic-ai/claude-code@latest @google/gemini-cli@latest @openai/codex@latest @github/copilot@latest \
     && rm -rf /var/lib/apt/lists/*
 
 # Create solver user with host UID/GID so bind-mounted files have correct ownership.
@@ -59,6 +58,19 @@ RUN cd /home/solver/vero-warm \
 ENV UV_CACHE_DIR="/home/solver/.cache/uv"
 RUN uvx lean-lsp-mcp --help >/dev/null 2>&1 \
     || echo "WARNING: lean-lsp-mcp pre-cache failed (optional; the lean-lsp MCP may be slower or unavailable at run time)"
+
+# Agent CLIs. Installed after the Lean/Mathlib layers so refreshing them
+# doesn't invalidate the Mathlib cache. A new CLI_CACHE_BUST value (`make
+# build` passes a timestamp) forces a fresh `@latest` resolve; otherwise
+# Docker's layer cache silently keeps the old versions, and new models get
+# rejected by an outdated CLI.
+ARG CLI_CACHE_BUST=0
+USER root
+RUN echo "CLI_CACHE_BUST=${CLI_CACHE_BUST}" \
+    && npm install -g @anthropic-ai/claude-code@latest @google/gemini-cli@latest @openai/codex@latest @github/copilot@latest \
+    && npm cache clean --force \
+    && claude --version
+USER solver
 
 # Pre-install lean4-skills plugin into a seed directory.
 RUN { claude plugin marketplace add cameronfreer/lean4-skills 2>&1 \

@@ -49,12 +49,13 @@ resume: check-auth ## Re-run only the ERROR tasks of a previous run in OUTPUT_DI
 	$(PY) scripts/run_bench.py --output-dir $(OUTPUT_DIR) --solver $(SOLVER) \
 	  --parallel $(PARALLEL) --timeout $(TIMEOUT) --docker-network "$(NETWORK)" --resume $(_filters) $(ARGS)
 
-build: ## Build the Docker image (vero-lean4) with the host UID/GID (NETWORK for RUN steps)
+build: ## Build the Docker image (vero-lean4) with the host UID/GID and the latest agent CLIs (NETWORK for RUN steps)
 	docker build -f Dockerfile --network=$(NETWORK) \
-	  --build-arg SOLVER_UID=$$(id -u) --build-arg SOLVER_GID=$$(id -g) -t $(IMAGE) .
+	  --build-arg SOLVER_UID=$$(id -u) --build-arg SOLVER_GID=$$(id -g) \
+	  --build-arg CLI_CACHE_BUST=$$(date +%s) -t $(IMAGE) .
 
 analyze: ## Re-check and analyze the results in OUTPUT_DIR
-	$(PY) scripts/analyze_bench.py --output-dir $(OUTPUT_DIR)
+	$(PY) -u scripts/analyze_bench.py --output-dir $(OUTPUT_DIR) --parallel $(PARALLEL)
 
 llm-check: SOLVER := scripts/claude_code.sh
 llm-check: check-auth ## LLM-review the PASS solutions in OUTPUT_DIR (isolated judge; ARGS='--force')

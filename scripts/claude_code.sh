@@ -19,7 +19,7 @@ set -euo pipefail
 
 TASK_DIR="$1"
 PROMPT="$2"
-MODEL="${CLAUDE_MODEL:-claude-opus-5}"
+MODEL="${CLAUDE_MODEL:-claude-opus-5-5}"
 # Raise output token limit to avoid truncation on long reasoning/proofs
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-64000}"
 
