@@ -69,7 +69,7 @@ USER root
 RUN echo "CLI_CACHE_BUST=${CLI_CACHE_BUST}" \
     && npm install -g @anthropic-ai/claude-code@latest @google/gemini-cli@latest @openai/codex@latest @github/copilot@latest \
     && npm cache clean --force \
-    && claude --version
+    && claude --version && codex --version
 USER solver
 
 # Pre-install lean4-skills plugin into a seed directory.
@@ -78,6 +78,17 @@ RUN { claude plugin marketplace add cameronfreer/lean4-skills 2>&1 \
       || echo "WARNING: lean4-skills plugin install for Claude Code failed (optional; the lean4 skill will be unavailable)" \
     && mkdir -p /home/solver/.plugin-seed \
     && cp -a /home/solver/.claude/plugins/* /home/solver/.plugin-seed/ 2>/dev/null || true
+
+RUN mkdir -p /home/solver/.agents/skills \
+    && for plugin in /home/solver/.plugin-seed/cache/lean4-skills/lean4/*; do \
+         if [ -f "$plugin/skills/lean4/SKILL.md" ]; then \
+           ln -s "$plugin" /home/solver/.lean4-codex \
+             && ln -s "$plugin/skills/lean4" /home/solver/.agents/skills/lean4; \
+           break; \
+         fi; \
+       done \
+    && { test -f /home/solver/.agents/skills/lean4/SKILL.md \
+         || echo "WARNING: lean4 skill unavailable for Codex (Claude plugin seed missing)"; }
 
 RUN { copilot plugin marketplace add cameronfreer/lean4-skills 2>&1 \
       && copilot plugin install lean4@lean4-skills 2>&1 ; } \

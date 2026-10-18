@@ -451,6 +451,31 @@ def _docker_user_args() -> List[str]:
 DOCKER_TASK_DIR = "/task"
 DOCKER_SOLVER_PATH = "/solver"
 
+
+def _codex_auth_mode() -> str:
+    mode = os.environ.get("CODEX_AUTH_MODE", "api")
+    if mode not in ("api", "chatgpt"):
+        raise ValueError("CODEX_AUTH_MODE must be api or chatgpt")
+    return mode
+
+
+def _codex_auth_file(*, use_override: bool = True) -> Path:
+    codex_dir = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    override = os.environ.get("CODEX_AUTH_FILE") if use_override else None
+    path = Path(override or codex_dir / "auth.json").expanduser().resolve()
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        raise ValueError(f"Cannot read Codex login at {path}; run codex login "
+                         "or set CODEX_AUTH_FILE") from None
+    tokens = data.get("tokens") if isinstance(data, dict) else None
+    if (not isinstance(tokens, dict) or data.get("auth_mode") != "chatgpt"
+            or data.get("OPENAI_API_KEY")
+            or not all(tokens.get(key) for key in ("access_token", "id_token", "refresh_token"))):
+        raise ValueError(f"{path} is not a saved ChatGPT login; run codex login")
+    return path
+
+
 # Auth + solver-config env vars forwarded into Docker containers.
 _AUTH_ENV_VARS = [
     # Set unless --run-unsolved; the solver scripts drop their web tools.
@@ -464,9 +489,9 @@ _AUTH_ENV_VARS = [
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     # Codex CLI
+    "CODEX_AUTH_MODE",
     "CODEX_API_KEY",
     "OPENAI_API_KEY",
-    # Codex custom provider (codex_cli.sh generates config.toml from these)
     "CODEX_BASE_URL",
     "CODEX_PROVIDER_NAME",
     "CODEX_MODEL",
@@ -498,9 +523,6 @@ def _docker_run_base(
         /task            — task working directory (read-write)
         /solver          — solver script (read-only, when provided)
 
-    Auth is passed via environment variables (CLAUDE_CODE_OAUTH_TOKEN,
-    ANTHROPIC_API_KEY, GEMINI_API_KEY, CODEX_API_KEY, etc.), not via
-    config-dir mounts.
     """
     task_dir = task.run_dir
     cmd = [
@@ -511,8 +533,14 @@ def _docker_run_base(
         "-v", f"{task_dir}:{DOCKER_TASK_DIR}",
         "-w", DOCKER_TASK_DIR,
     ]
-    # Forward auth env vars if set on the host.
+    codex_chatgpt = (solver_script is not None
+                    and solver_script.name == "codex_cli.sh"
+                    and _codex_auth_mode() == "chatgpt")
     for var in _AUTH_ENV_VARS:
+        if codex_chatgpt and var in (
+            "CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_BASE_URL", "CODEX_PROVIDER_NAME",
+        ):
+            continue
         val = os.environ.get(var)
         if val:
             cmd.extend(["-e", f"{var}={val}"])
@@ -520,6 +548,8 @@ def _docker_run_base(
         cmd.extend(["--name", container_name])
     if solver_script:
         cmd.extend(["-v", f"{solver_script}:{DOCKER_SOLVER_PATH}:ro"])
+    if codex_chatgpt:
+        cmd.extend(["-v", f"{_codex_auth_file()}:/home/solver/.codex/auth.json:rw"])
     if docker_extra_args:
         cmd.extend(shlex.split(docker_extra_args))
     return cmd
@@ -989,7 +1019,8 @@ def main():
         help="Per-task $ cap forwarded to the solver (CLAUDE_MAX_BUDGET_USD "
              "for claude_code.sh, COPILOT_MAX_BUDGET_USD for copilot.sh). "
              "copilot.sh defaults to $30 when this is unset; claude_code.sh "
-             "is unlimited by default.",
+             "is unlimited by default. Not supported by codex_cli.sh; "
+             "use --timeout for its wall-clock limit.",
     )
     parser.add_argument(
         "--abort-after", type=int, default=3,
@@ -1068,6 +1099,19 @@ def main():
         parser.error(f"Solver script not found: {solver_script}")
     if not os.access(solver_script, os.X_OK):
         parser.error(f"Solver script is not executable: {solver_script}")
+    if solver_script.name == "codex_cli.sh" and args.max_budget_usd is not None:
+        parser.error("codex_cli.sh does not support --max-budget-usd; "
+                     "use --timeout for its wall-clock limit")
+    if solver_script.name == "codex_cli.sh":
+        try:
+            codex_mode = _codex_auth_mode()
+            if codex_mode == "chatgpt":
+                _codex_auth_file(use_override=not args.no_docker)
+                if args.parallel != 1:
+                    parser.error("ChatGPT login uses one refresh-token stream; "
+                                 "use --parallel 1 to avoid concurrent token refresh")
+        except ValueError as e:
+            parser.error(str(e))
 
     # The solver scripts read this and drop their web tools; Docker mode
     # forwards it via _AUTH_ENV_VARS.

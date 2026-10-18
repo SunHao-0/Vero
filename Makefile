@@ -77,6 +77,14 @@ check-auth:
 	@if echo "$(SOLVER)" | grep -q copilot; then \
 	  [ -n "$$COPILOT_GITHUB_TOKEN$$GH_TOKEN$$GITHUB_TOKEN" ] \
 	    || { echo "error: set COPILOT_GITHUB_TOKEN (or GH_TOKEN/GITHUB_TOKEN) for scripts/copilot.sh"; exit 1; }; \
+	elif echo "$(SOLVER)" | grep -q codex; then \
+	  if [ "$${CODEX_AUTH_MODE:-api}" = chatgpt ]; then \
+	    [ -r "$${CODEX_AUTH_FILE:-$${CODEX_HOME:-$$HOME/.codex}/auth.json}" ] \
+	      || { echo "error: run codex login or set CODEX_AUTH_FILE to a saved ChatGPT auth.json"; exit 1; }; \
+	  else \
+	    [ -n "$$CODEX_API_KEY$$OPENAI_API_KEY" ] \
+	    || { echo "error: set CODEX_API_KEY (or OPENAI_API_KEY) for scripts/codex_cli.sh"; exit 1; }; \
+	  fi; \
 	else \
 	  [ -n "$$CLAUDE_CODE_OAUTH_TOKEN$$ANTHROPIC_API_KEY" ] \
 	    || { echo "error: set CLAUDE_CODE_OAUTH_TOKEN (or ANTHROPIC_API_KEY) for scripts/claude_code.sh"; exit 1; }; \
