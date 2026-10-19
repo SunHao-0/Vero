@@ -237,11 +237,15 @@ TRAJ_CATS = [("explore", "Explore", "#2a78d6"),
              ("compile", "Compile", "#1baf7a"),
              ("check", "Check", "#eda100")]
 
-# Outcomes: the green the site already uses for PASS, with both kinds of
-# non-solve in neutrals so the eye reads "how much is solved" first.
+# Outcomes: the green the site already uses for PASS, with every kind of
+# non-solve muted so the eye reads "how much is solved" first. A pass the
+# LLM review rejected is a non-solve too, tinted so it does not read as a
+# plain failure; an error is the harness or provider failing, not the model.
 OUTCOMES = [("PASS", "Solved", "#1f7a37"),
+            ("REJECTED", "Rejected in review", "#d6a443"),
             ("FAIL", "Failed", "#8a8f98"),
-            ("TIMEOUT", "Timed out", "#c9ccd1")]
+            ("TIMEOUT", "Timed out", "#c9ccd1"),
+            ("ERROR", "Error", "#e2b0b0")]
 OUTCOME_LABEL = {k: lbl for k, lbl, _ in OUTCOMES}
 DASH = "\u2014"
 OUTCOME_COLOR = {k: c for k, _, c in OUTCOMES}
@@ -249,6 +253,25 @@ OUTCOME_COLOR = {k: c for k, _, c in OUTCOMES}
 
 # A run needs at least this many tasks before its own charts say anything.
 MIN_CHART_TASKS = 10
+
+
+def outcome(rec):
+    """How one run on one task scores: check.sh's verdict, except that a pass
+    the blind LLM review rejected does not count as solved."""
+    status = rec.get("status", "UNKNOWN")
+    if status == "PASS" and rec.get("review") == "REJECT":
+        return "REJECTED"
+    return status
+
+
+def outcome_pill(rec):
+    out = outcome(rec)
+    if out == "REJECTED":
+        return ('<span class="status rejected" title="Passed check.sh; '
+                'rejected by the blind LLM review">Rejected</span>')
+    cls = "solved" if out == "PASS" else "open"
+    return (f'<span class="status {cls}">'
+            f'{esc(OUTCOME_LABEL.get(out, out))}</span>')
 
 
 def cost_rate(recs):
@@ -276,7 +299,8 @@ def run_stats(recs):
     get killed. Each is therefore bounded by its own wall clock at the highest
     cost rate that same run reached, and the total is given as a bound.
     """
-    solved = [r for r in recs if r.get("status") == "PASS"]
+    outs = [outcome(r) for r in recs]
+    solved = [r for r, o in zip(recs, outs) if o == "PASS"]
     priced = [r for r in recs if r.get("cost_usd")]
     rate = cost_rate(recs)
     recorded = sum(r["cost_usd"] for r in priced)
@@ -286,11 +310,56 @@ def run_stats(recs):
     return {
         "n": len(recs), "solved": len(solved),
         "rate": round(100 * len(solved) / len(recs)) if recs else 0,
+        "checked": sum(1 for r in recs if r.get("status") == "PASS"),
+        **{k.lower(): outs.count(k)
+           for k in ("REJECTED", "FAIL", "TIMEOUT", "ERROR")},
         "avg_time": statistics.fmean(times) if times else 0,
         "avg_cost": statistics.fmean(costs) if costs else 0,
         "recorded": recorded, "bounded": bounded,
+        # A harness that reports no cost at all (Codex CLI) is not the same
+        # as runs killed before their final record: there is nothing to
+        # bound, so its cost is "not reported", never $0.
+        "reports_cost": bool(priced),
         "unpriced": len(recs) - len(priced), "cost_rate": rate,
     }
+
+
+NOT_REPORTED = "not reported"
+
+
+def fmt_run_cost(st):
+    """A run's total cost: recorded, bounded when some runs were killed, or
+    not reported by the harness at all."""
+    if not st["reports_cost"]:
+        return NOT_REPORTED
+    return ("\u2264 " + fmt_usd(st["bounded"])) if st["unpriced"] \
+        else fmt_usd(st["recorded"])
+
+
+def fmt_web(run, recs):
+    """Web access as the run set it, and whether the agent used it anyway."""
+    web = run.get("web_access")
+    if web is True:
+        return "On"
+    if web == "mixed":
+        return "Mixed"
+    if web is None:
+        return "Not recorded"
+    used = [r for r in recs if r.get("web_calls")]
+    if not used:
+        return "Off"
+    calls = sum(r["web_calls"] for r in used)
+    return (f"Off, but used in {spell(len(used))} "
+            f"task{'s' if len(used) > 1 else ''} ({calls} "
+            f"call{'s' if calls > 1 else ''})")
+
+
+def fmt_review(run, runs):
+    review = run.get("review")
+    if not review:
+        return "Not run"
+    judge = review.get("judge")
+    return f"Blind, by {model_label(judge, runs)}" if judge else "Blind"
 
 
 def model_label(model, runs):
@@ -312,7 +381,10 @@ def load_runs():
         except json.JSONDecodeError:
             continue
         if r.get("tasks"):
-            r["rate"] = cost_rate(list(r["tasks"].values()))
+            recs = list(r["tasks"].values())
+            r["rate"] = cost_rate(recs)
+            r["reports_cost"] = (any(t.get("cost_usd") for t in recs)
+                                 or bool((r.get("summary") or {}).get("cost_usd")))
             runs.append(r)
     runs.sort(key=lambda r: r.get("date") or "", reverse=True)
     return runs
@@ -436,13 +508,14 @@ def traj_svg(rec):
 
 def run_card(run, rec, published):
     """One agent run on one task: what it cost and how it was spent."""
-    status = rec.get("status", "UNKNOWN")
-    pill_cls = "solved" if status == "PASS" else "open"
+    out = outcome(rec)
+    reports_cost = run.get("reports_cost", True)
     tools = rec.get("tools") or {}
     tokens = rec.get("tokens")
     cost, est = cost_bound(rec, run.get("rate", 0))
     stats = [("Wall clock", fmt_dur(rec.get("elapsed_s"))),
-             ("Cost", ("\u2264 " + fmt_usd(cost)) if est else fmt_usd(cost)),
+             ("Cost", (("\u2264 " + fmt_usd(cost)) if est else fmt_usd(cost))
+              if reports_cost else NOT_REPORTED),
              ("Turns", str(rec.get("turns") or DASH)),
              ("Tool calls", str(rec.get("tool_calls") or DASH)),
              ("Compiles", str(tools.get("compile", 0) if tools else DASH)),
@@ -451,16 +524,39 @@ def run_card(run, rec, published):
     tiles = "".join(f'<div class=runstat><div class=rs-num>{esc(v)}</div>'
                     f'<div class=rs-label>{esc(k)}</div></div>'
                     for k, v in stats)
-    note = ""
-    if status == "PASS" and not published:
-        note = ('<p class=runnote>The solution passed every gate; it is under '
-                'review and not published yet.</p>')
-    elif status == "TIMEOUT":
-        note = (f'<p class=runnote>Killed at the {fmt_dur(run.get("limit_s"))} '
-                f'cap. A killed run writes no final record, so its turns and '
-                f'token totals are unknown and its cost is an upper bound: '
-                f'this much wall clock at the highest rate the run reached '
-                f'elsewhere. The tool calls below are exact.</p>')
+    notes = []
+    if out == "PASS" and not published:
+        notes.append('The solution passed every gate; it is under review and '
+                     'not published yet.')
+    elif out == "REJECTED":
+        why = " and ".join({"complexity": "the task's complexity rule",
+                            "faithful": "satisfying check.sh instead of the "
+                                        "specification"}.get(f, f)
+                           for f in rec.get("review_flags") or [])
+        notes.append('The solution passed <code>check.sh</code>, but the blind '
+                     'LLM review rejected it'
+                     + (f' on {esc(why)}' if why else '')
+                     + ', so it does not count as solved.')
+    elif out == "TIMEOUT":
+        notes.append(f'Killed at the {fmt_dur(run.get("limit_s"))} cap. A '
+                     f'killed run writes no final record, so its turns and '
+                     f'token totals are unknown'
+                     + (' and its cost is an upper bound: this much wall '
+                        'clock at the highest rate the run reached elsewhere'
+                        if reports_cost else '')
+                     + '. The tool calls below are exact.')
+    elif out == "ERROR":
+        notes.append('The run failed for a reason outside the agent (the '
+                     'harness or the model provider), before it could be '
+                     'scored.')
+    if not reports_cost:
+        notes.append(f'{esc(run.get("agent") or "This harness")} reports '
+                     f'token counts but neither cost nor turns.')
+    if rec.get("web_calls") and run.get("web_access") is False:
+        notes.append(f'Web access was meant to be off, but the agent made '
+                     f'{rec["web_calls"]} web call'
+                     f'{"s" if rec["web_calls"] > 1 else ""} in this run.')
+    note = "".join(f'<p class=runnote>{n}</p>' for n in notes)
     meta = " \u00b7 ".join(x for x in (run.get("agent"), fmt_span(run))
                           if x)
     return f"""
@@ -468,7 +564,7 @@ def run_card(run, rec, published):
   <div class=runhead>
     <strong>{esc(run.get("label") or run.get("model") or "Agent")}</strong>
     <span class=runmeta>{esc(meta)}</span>
-    <span class="status {pill_cls}">{esc(status)}</span>
+    {outcome_pill(rec)}
   </div>
   <div class=runstats>{tiles}</div>
   {traj_svg(rec)}
@@ -567,23 +663,23 @@ def render_index(tasks, runs, repo_url):
   verifier, LLVM, and the seL4 microkernel. Each specification encodes a new
   requirement with no existing implementation, so a correct solution improves
   the upstream system.</p>
-  <p class=stat>{len(tasks)} problems ({esc(area_line)}). {solved} solved by an
-  agent, {published} with the solution published.
+  <p class=stat>{len(tasks)} problems ({esc(area_line)}). {solved} solved by at
+  least one agent, {published} with the solution published.
   <a href="results.html">Run results and cost</a>.</p>
 </section>
 """
 
     controls = """
 <div class=controls>
-  <input id=search type=search placeholder="Search problems" autocomplete=off>
+  <input class=search type=search data-for=problems placeholder="Search problems" autocomplete=off>
   <div class=selects>
-    <select id=areasel aria-label="Filter by area">
+    <select data-for=problems data-attr=area aria-label="Filter by area">
       <option value=all>All areas</option>
       <option value=eBPF>eBPF</option>
       <option value=LLVM>LLVM</option>
       <option value=seL4>seL4</option>
     </select>
-    <select id=statussel aria-label="Filter by status">
+    <select data-for=problems data-attr=status aria-label="Filter by status">
       <option value=all>All status</option>
       <option value=solved>Solved</option>
       <option value=published>Published</option>
@@ -594,13 +690,13 @@ def render_index(tasks, runs, repo_url):
 """
 
     table = f"""
-<table class=problems id=problems>
+<table class="problems filterable" id=problems>
 <thead><tr><th>#</th><th>Title</th><th>Area</th><th>Group</th><th>Status</th></tr></thead>
 <tbody>
 {''.join(rows)}
 </tbody>
 </table>
-<p class=empty id=empty hidden>No problems match.</p>
+<p class=empty data-for=problems hidden>No problems match.</p>
 """
     return page("Vero: Problems", intro + controls + table, 0, repo_url, "problems")
 
@@ -769,25 +865,40 @@ def render_about(tasks, runs, repo_url):
         f'<td>{esc(model_label(m, runs))}</td><td>{esc(h)}</td></tr>'
         for d, n, a, m, h in PUBLISHED)
 
+    # Every model with a per-task breakdown, side by side; the results page
+    # holds the conditions each ran under and the paper's totals-only run.
     run_line = ""
-    if runs:
-        r = runs[0]
-        recs = [rec for t in tasks for run, rec in t["runs"]
-                if run["id"] == r["id"]]
-        st = run_stats(recs)
-        total = ("\u2264 " + fmt_usd(st["bounded"])) if st["unpriced"] \
-            else fmt_usd(st["recorded"])
+    full = [r for r in runs
+            if sum(1 for t in tasks for run, _ in t["runs"]
+                   if run["id"] == r["id"]) >= MIN_CHART_TASKS]
+    if full:
+        rows = ""
+        for r in full:
+            recs = [rec for t in tasks for run, rec in t["runs"]
+                    if run["id"] == r["id"]]
+            st = run_stats(recs)
+            rows += (
+                f'<tr><td class=ttl>{esc(r.get("label") or r.get("model"))}</td>'
+                f'<td>{esc(r.get("agent") or DASH)}</td>'
+                f'<td>{esc(fmt_span(r))}</td>'
+                f'<td>{esc(fmt_web(r, recs))}</td>'
+                f'<td>{esc(fmt_review(r, runs))}</td>'
+                f'<td class=numv><strong>{st["solved"]}</strong> of {st["n"]} '
+                f'({st["rate"]}%)</td>'
+                f'<td class=numv>{esc(fmt_dur(st["avg_time"]))}</td></tr>')
         run_line = (
-            f'<p>The suite was run once with '
-            f'<strong>{esc(r.get("label"))}</strong> on '
-            f'{esc(fmt_span(r))}, one attempt per task under a '
-            f'{esc(fmt_dur(r.get("limit_s")))} cap: it solved '
-            f'<strong>{st["solved"]} of the {st["n"]} tasks it ran</strong>, at '
-            f'an average of {esc(fmt_dur(st["avg_time"]))} and '
-            f'{esc(fmt_usd(st["avg_cost"]))} per solved task, for {esc(total)} '
-            f'of API spend in total.</p>'
+            f'<p class=sublede>Each model gets one attempt per task under a '
+            f'{esc(fmt_dur(full[0].get("limit_s")))} cap, with no human help. '
+            f'A task counts as solved when <code>check.sh</code> passes and, '
+            f'in a reviewed run, the blind LLM review does not reject the '
+            f'solution.</p>'
+            f'<div class=tablewrap><table class=results>'
+            f'<thead><tr><th>Model</th><th>Agent</th><th>Dates</th>'
+            f'<th>Web access</th><th>LLM review</th><th>Solved</th>'
+            f'<th>Average time per solve</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table></div>'
             f'<p class=cta><a class="btn primary" href="results.html">'
-            f'Full results and cost</a>'
+            f'Full results, conditions and cost</a>'
             f'<a class=btn href="problems.html?status=solved">'
             f'Solved tasks</a></p>')
 
@@ -894,11 +1005,12 @@ def render_about(tasks, runs, repo_url):
     return page("Vero: About", body, 0, repo_url, "about", landing=True)
 
 
-def outcome_bars(rows):
+def outcome_bars(rows, uid=""):
     """Solved / failed / timed out per task group, as stacked bars.
 
-    `rows` is [(area, group, {status: count}, total)], longest bar = widest
+    `rows` is [(area, group, {outcome: count}, total)], longest bar = widest
     group, so the bars carry suite composition as well as the solve rate.
+    `uid` keeps the clip-path ids unique when one page holds several charts.
     """
     if not rows:
         return ""
@@ -909,7 +1021,7 @@ def outcome_bars(rows):
     out, y = [], 6
     for area, group, counts, total in rows:
         width = span * total / widest
-        clip = f"clip{area}{group}"
+        clip = re.sub(r"\W", "", f"clip{uid}{area}{group}")
         segs, x = [], 0.0
         for key, label, color in OUTCOMES:
             n = counts.get(key, 0)
@@ -931,8 +1043,9 @@ def outcome_bars(rows):
   <text x="{LAB + width + 8:.1f}" y="{y + 12}" font-size="11.5" fill="#666">
     {solved}/{total}</text>""")
         y += rowh
+    drawn = {k for _, _, counts, _ in rows for k, n in counts.items() if n}
     legend = "".join(f'<span class=key><i style="background:{c}"></i>{esc(l)}</span>'
-                     for _, l, c in OUTCOMES)
+                     for k, l, c in OUTCOMES if k in drawn)
     return f"""
 <div class=chart>
   <svg viewBox="0 0 {W} {y + 4}" role="img"
@@ -946,8 +1059,8 @@ def outcome_bars(rows):
 def cost_scatter(points):
     """Cost against wall-clock time, one mark per run that recorded a cost.
 
-    `points` is [(name, title, minutes, usd, status)]. Solved runs are filled
-    marks, failed ones hollow, so outcome never rides on colour alone.
+    `points` is [(name, title, minutes, usd, outcome)]. Solved runs are
+    filled marks, the rest hollow, so outcome never rides on colour alone.
     """
     if not points:
         return ""
@@ -986,7 +1099,7 @@ def cost_scatter(points):
         f'<text x="{xs(top[2]) - 9:.1f}" y="{ys(top[3]) + 4:.1f}" font-size="10.5" '
         f'fill="#444" text-anchor="end">{esc(top[1])} {fmt_usd(top[3])}</text>')
     legend = ('<span class=key><i class=dot style="background:#1f7a37"></i>Solved'
-              '</span><span class=key><i class="dot hollow"></i>Failed</span>')
+              '</span><span class=key><i class="dot hollow"></i>Not solved</span>')
     return f"""
 <div class=chart>
   <svg viewBox="0 0 {W} {H}" role="img"
@@ -1002,8 +1115,28 @@ def cost_scatter(points):
 """
 
 
+def run_note_web(run, covered):
+    """A sentence for a run that disabled the web yet reached it."""
+    if run.get("web_access") is not False:
+        return ""
+    used = [(t, rec) for t, rec in covered if rec.get("web_calls")]
+    if not used:
+        return ""
+    calls = sum(rec["web_calls"] for _, rec in used)
+    solved = sum(1 for _, rec in used if outcome(rec) == "PASS")
+    names = ", ".join(t["title"] for t, _ in used)
+    if len(used) == 1:
+        where = f'one task ({names}), which was {"" if solved else "not "}solved'
+    else:
+        where = f'{spell(len(used))} tasks ({names}), {spell(solved)} of them solved'
+    return (f'{esc(run.get("label") or run.get("model"))} ran with web access '
+            f'off, yet made {calls} web call{"s" if calls > 1 else ""} in '
+            f'{esc(where)}.')
+
+
 def render_results(tasks, runs, repo_url):
-    """One section per run: what it solved, what it cost, how it was spent."""
+    """Every model side by side, then each run on its own: what it solved,
+    what it cost, how it was spent."""
     if not runs:
         return None
     covered = {r["id"]: [(t, rec) for t in tasks for run, rec in t["runs"]
@@ -1012,7 +1145,8 @@ def render_results(tasks, runs, repo_url):
              for r in runs}
     # A run published only as totals (e.g. the paper's evaluation) states how
     # many tasks it ran and what the whole run cost; its per-task records cover
-    # just the tasks whose numbers were published individually.
+    # just the tasks whose numbers were published individually, so the rest of
+    # its outcome breakdown is unknown.
     for r in runs:
         summ = r.get("summary")
         if summ:
@@ -1021,12 +1155,17 @@ def render_results(tasks, runs, repo_url):
             st["rate"] = round(100 * st["solved"] / summ["n"])
             st["recorded"] = st["bounded"] = summ["cost_usd"]
             st["unpriced"] = 0
+            st["reports_cost"] = True
+            st["totals_only"] = True
     charted = [r for r in runs if len(covered[r["id"]]) >= MIN_CHART_TASKS]
+    label = {r["id"]: r.get("label") or r.get("model") for r in runs}
 
-    # The run table is the comparison: same tasks, same cap, same accounting
-    # for every model.  Runs are only comparable when they cover the same
-    # tasks, which the "partial" tag flags.
-    run_rows = ""
+    # The side-by-side tables are the comparison: same tasks, same cap, same
+    # accounting for every model, and the conditions that differ in plain
+    # view. Runs are only comparable when they cover the same tasks, which
+    # the "partial" tag flags.
+    any_error = any(st["error"] for st in stats.values())
+    out_rows = setup_rows = ""
     for r in runs:
         st = stats[r["id"]]
         # A run over a handful of tasks has a solve rate, but not one that
@@ -1035,24 +1174,170 @@ def render_results(tasks, runs, repo_url):
         partial = st["n"] < MIN_CHART_TASKS
         tag = ' <span class=badge>partial</span>' if partial else ""
         solved = (f'{st["solved"]} of {st["n"]}' if partial
-                  else f'{st["solved"]} ({st["rate"]}%)')
-        total = (("&le; " + fmt_usd(st["bounded"])) if st["unpriced"]
-                 else fmt_usd(st["recorded"]))
-        run_rows += (
-            f'<tr><td class=ttl>{esc(r.get("label") or r.get("model"))}{tag}</td>'
-            f'<td>{esc(fmt_span(r))}</td>'
+                  else f'<strong>{st["solved"]}</strong> ({st["rate"]}%)')
+        part = (lambda k: DASH) if st.get("totals_only") else \
+            (lambda k: str(st[k]))
+        reviewed = bool(r.get("review"))
+        out_rows += (
+            f'<tr><td class=ttl>{esc(label[r["id"]])}{tag}</td>'
             f'<td class=numv>{st["n"]}</td>'
             f'<td class=numv>{solved}</td>'
+            f'<td class=numv>{part("checked")}</td>'
+            f'<td class=numv>{part("rejected") if reviewed else DASH}</td>'
+            f'<td class=numv>{part("fail")}</td>'
+            f'<td class=numv>{part("timeout")}</td>'
+            + (f'<td class=numv>{part("error")}</td>' if any_error else "")
+            + '</tr>')
+        setup_rows += (
+            f'<tr><td class=ttl>{esc(label[r["id"]])}</td>'
+            f'<td>{esc(r.get("agent") or DASH)}</td>'
+            f'<td>{esc(fmt_span(r))}</td>'
+            f'<td>{esc(fmt_web(r, [rec for _, rec in covered[r["id"]]]))}</td>'
+            f'<td>{esc(fmt_review(r, runs))}</td>'
+            f'<td class=numv>{r.get("parallel") or DASH}</td>'
             f'<td class=numv>{esc(fmt_dur(st["avg_time"]))}</td>'
-            f'<td class=numv>{esc(fmt_usd(st["avg_cost"]))}</td>'
-            f'<td class=numv>{esc(fmt_usd(st["recorded"]))}</td>'
-            f'<td class=numv>{total}</td></tr>')
-
+            f'<td class=numv>{esc(fmt_usd(st["avg_cost"]) if st["reports_cost"] else NOT_REPORTED)}</td>'
+            f'<td class=numv>{esc(fmt_run_cost(st))}</td></tr>')
 
     partial_hint = (" Runs marked <em>partial</em> covered only part of the "
                     "suite and are listed for provenance, not for comparison."
                     if any(st["n"] < MIN_CHART_TASKS for st in stats.values())
                     else "")
+    totals_hint = (" A run published only as totals has no per-task "
+                   "breakdown, so its other columns are empty."
+                   if any(st.get("totals_only") for st in stats.values())
+                   else "")
+    judges = sorted({r["review"]["judge"] for r in runs
+                     if (r.get("review") or {}).get("judge")})
+    judge_hint = ""
+    if judges:
+        judge_hint = (
+            f'<p class=hint>The LLM review is run by '
+            f'{esc(", ".join(model_label(j, runs) for j in judges))}, the '
+            f'same judge for every reviewed run. It sees only the submitted '
+            f'<code>Task.lean</code> next to the files the task was issued '
+            f'with &mdash; never the transcript, the agent, or the model '
+            f'&mdash; and it can only take a pass away, for satisfying '
+            f'<code>check.sh</code> instead of the specification or for '
+            f'breaking the task\'s complexity rule. Runs without a review '
+            f'count every <code>check.sh</code> pass as solved.</p>')
+    web_notes = " ".join(n for n in (run_note_web(r, covered[r["id"]])
+                                     for r in runs) if n)
+    nocost = [label[r["id"]] for r in runs if not stats[r["id"]]["reports_cost"]]
+    cost_hint = (
+        '<p class=hint>Cost is what the harness reported for the run at API '
+        'prices.'
+        + (f' {esc(" and ".join(nocost))} ran under a harness that reports '
+           f'token counts but no cost, so {"its cost is" if len(nocost) == 1 else "their cost is"} '
+           f'given as not reported rather than estimated.' if nocost else '')
+        + ' A run killed at the cap writes no final cost record. Dropping '
+        'those would understate what a model spent, since the longest runs '
+        'are the ones that get killed, so the run cost bounds each of them by '
+        'its wall clock at the highest cost rate that same run reached. '
+        'Average time and cost are over solved tasks; "tasks at once" is how '
+        'many tasks shared the machine, which wall-clock time depends on.'
+        + (f' {web_notes}' if web_notes else '') + '</p>')
+
+    comparison = f"""
+<h2>Side by side</h2>
+<div class=tablewrap>
+<table class=results>
+<thead><tr><th>Model</th><th>Tasks</th><th>Solved</th><th>Passed check.sh</th>
+<th>Rejected in review</th><th>Failed</th><th>Timed out</th>{'<th>Errors</th>' if any_error else ''}</tr></thead>
+<tbody>{out_rows}</tbody>
+</table>
+</div>
+<p class=hint>A task is solved when <code>check.sh</code> passes every gate and
+the blind LLM review does not reject the solution.{partial_hint}{totals_hint}</p>
+{judge_hint}
+<h3>How each run was set up</h3>
+<div class=tablewrap>
+<table class=results>
+<thead><tr><th>Model</th><th>Agent</th><th>Dates</th><th>Web access</th>
+<th>LLM review</th><th>Tasks at once</th><th>Average time</th><th>Average cost</th>
+<th>Run cost</th></tr></thead>
+<tbody>{setup_rows}</tbody>
+</table>
+</div>
+{cost_hint}
+"""
+
+    # Per group: how each model does on the same slice of the suite.
+    group_rows = ""
+    if charted:
+        order = []
+        for t in tasks:
+            if (t["area"], t["group"]) not in order:
+                order.append((t["area"], t["group"]))
+        by_task = {r["id"]: {t["name"]: rec for t, rec in covered[r["id"]]}
+                   for r in charted}
+        for area, group in order + [("", "")]:
+            names = [t["name"] for t in tasks
+                     if not area or (t["area"], t["group"]) == (area, group)]
+            cells = ""
+            for r in charted:
+                recs = [by_task[r["id"]][n] for n in names
+                        if n in by_task[r["id"]]]
+                won = sum(1 for rec in recs if outcome(rec) == "PASS")
+                cells += (f'<td class=numv>{won} / {len(recs)}</td>' if recs
+                          else f'<td class=numv>{DASH}</td>')
+            head = (f'<td>{badge(area, "area-" + area)}</td>'
+                    f'<td class=grp>{esc(group)}</td>' if area else
+                    '<td class=ttl colspan=2>All tasks</td>')
+            group_rows += (f'<tr{" class=total" if not area else ""}>{head}'
+                           f'<td class=numv>{len(names)}</td>{cells}</tr>')
+    by_group = f"""
+<h2>By task group</h2>
+<p class=hint>Tasks solved out of the tasks each model ran in the group.</p>
+<div class=tablewrap>
+<table class=results>
+<thead><tr><th>Area</th><th>Group</th><th>Tasks</th>
+{''.join(f'<th>{esc(label[r["id"]])}</th>' for r in charted)}</tr></thead>
+<tbody>{group_rows}</tbody>
+</table>
+</div>
+""" if charted else ""
+
+    # Task by task: one row per task, one column per model.
+    matrix_rows = []
+    for t in tasks:
+        recs = {run["id"]: rec for run, rec in t["runs"]}
+        keywords = " ".join([t["name"], t["title"], t["area"],
+                             t["group"]]).lower()
+        cells = "".join(
+            f'<td>{outcome_pill(recs[r["id"]])}</td>' if r["id"] in recs
+            else f'<td class=hint>not run</td>' for r in charted)
+        matrix_rows.append(
+            f'<tr data-k="{esc(keywords)}" data-area="{t["area"]}" '
+            f'onclick="location=\'problems/{t["name"]}.html\'">'
+            f'<td class=num>{t["id"]:03d}</td>'
+            f'<td class=ttl><a href="problems/{t["name"]}.html">{esc(t["title"])}</a></td>'
+            f'<td>{badge(t["area"], "area-" + t["area"])}</td>'
+            f'<td class=grp>{esc(t["group"])}</td>{cells}</tr>')
+    matrix = f"""
+<h2>Task by task</h2>
+<p class=hint>Every task, with each model's outcome on it. Open a task for the
+run cards and activity profiles.</p>
+<div class=controls>
+  <input class=search type=search data-for=matrix placeholder="Search tasks" autocomplete=off>
+  <div class=selects>
+    <select data-for=matrix data-attr=area aria-label="Filter by area">
+      <option value=all>All areas</option>
+      <option value=eBPF>eBPF</option>
+      <option value=LLVM>LLVM</option>
+      <option value=seL4>seL4</option>
+    </select>
+  </div>
+</div>
+<div class=tablewrap>
+<table class="problems filterable" id=matrix>
+<thead><tr><th>#</th><th>Task</th><th>Area</th><th>Group</th>
+{''.join(f'<th>{esc(label[r["id"]])}</th>' for r in charted)}</tr></thead>
+<tbody>{''.join(matrix_rows)}</tbody>
+</table>
+</div>
+<p class=empty data-for=matrix hidden>No tasks match.</p>
+""" if charted else ""
 
     sections = []
     for run in charted:
@@ -1060,15 +1345,18 @@ def render_results(tasks, runs, repo_url):
         rate = st["cost_rate"]
         tiles = "".join(
             f'<div class=stat-tile><div class=stat-num>{esc(num)}</div>'
-            f'<div class=stat-label>{esc(label)}</div></div>'
-            for num, label in [
+            f'<div class=stat-label>{esc(lbl)}</div></div>'
+            for num, lbl in [
                 (f'{st["solved"]}/{st["n"]}', f'tasks solved ({st["rate"]}%)'),
                 (fmt_dur(st["avg_time"]), "average time per solved task"),
-                (fmt_usd(st["avg_cost"]), "average cost per solved task"),
+                (fmt_usd(st["avg_cost"]) if st["reports_cost"] else DASH,
+                 "average cost per solved task" if st["reports_cost"]
+                 else "cost not reported"),
                 ((f'\u2264 {fmt_usd0(st["bounded"])}' if st["unpriced"]
-                  else fmt_usd0(st["recorded"])),
-                 "upper bound on run cost" if st["unpriced"]
-                 else "cost of the run"),
+                  else fmt_usd0(st["recorded"])) if st["reports_cost"] else DASH,
+                 ("upper bound on run cost" if st["unpriced"]
+                  else "cost of the run") if st["reports_cost"]
+                 else "run cost not reported"),
             ])
 
         order, groups = [], {}
@@ -1077,15 +1365,20 @@ def render_results(tasks, runs, repo_url):
             if key not in groups:
                 groups[key] = {}
                 order.append(key)
-            groups[key][rec["status"]] = groups[key].get(rec["status"], 0) + 1
+            out = outcome(rec)
+            groups[key][out] = groups[key].get(out, 0) + 1
         bars = outcome_bars([(a, g, groups[(a, g)], sum(groups[(a, g)].values()))
-                             for a, g in order])
+                             for a, g in order], uid=run["id"])
         points = [(t["name"], t["title"], rec["elapsed_s"] / 60, rec["cost_usd"],
-                   rec["status"]) for t, rec in covered[run["id"]]
+                   outcome(rec)) for t, rec in covered[run["id"]]
                   if rec.get("cost_usd") and rec.get("elapsed_s")]
         killed = st["unpriced"]
         cost_note = ""
-        if killed:
+        if not st["reports_cost"]:
+            cost_note = (f'<p class=hint>{esc(run.get("agent") or "The harness")} '
+                         f'reports no cost, so there is no cost chart for '
+                         f'this run.</p>')
+        elif killed:
             cost_note = (
                 f'<p class=hint>{killed} runs were killed at the '
                 f'{esc(fmt_dur(run.get("limit_s")))} cap and write no cost '
@@ -1094,18 +1387,28 @@ def render_results(tasks, runs, repo_url):
                 f'the highest rate this run reached '
                 f'({esc(fmt_usd(rate * 60))} per minute), which is where the '
                 f'{esc(fmt_usd(st["bounded"]))} bound comes from.</p>')
+        setup = [f'{esc(run.get("agent") or "")}, {esc(fmt_span(run))}.',
+                 f'One attempt per task, no human help, '
+                 f'{esc(fmt_dur(run.get("limit_s")))} of wall clock per task',
+                 ]
+        web = fmt_web(run, [rec for _, rec in covered[run["id"]]])
+        setup[1] += f'; web access {esc(web[0].lower() + web[1:])}'
+        if run.get("parallel"):
+            setup[1] += (f'; {spell(run["parallel"])} task'
+                         f'{"s" if run["parallel"] > 1 else ""} at a time')
+        setup[1] += "."
+        review = ("Every solution that passed <code>check.sh</code> went "
+                  "through the blind LLM review."
+                  if run.get("review") else
+                  "This run was not LLM-reviewed.")
         sections.append(f"""
-<h2>{esc(run.get("label") or run.get("model"))}</h2>
-<p>{esc(run.get("agent"))}, {esc(fmt_span(run))}. One attempt per
-task, no human help, {esc(fmt_dur(run.get("limit_s")))} of wall clock per task.
-{st["n"]} of the {len(tasks)} tasks were run.</p>
+<h2>{esc(label[run["id"]])}</h2>
+<p>{' '.join(setup)} {review} {st["n"]} of the {len(tasks)} tasks were run.</p>
 <div class=stats>{tiles}</div>
 <h3>Where it solves and where it stalls</h3>
 <p class=hint>One bar per task group, as long as the group is large.</p>
 {bars}
-<h3>What a task costs</h3>
-<p class=hint>Every run that recorded a cost, against the wall clock it
-took.</p>
+{'<h3>What a task costs</h3><p class=hint>Every run that recorded a cost, against the wall clock it took.</p>' if points else ''}
 {cost_scatter(points)}
 {cost_note}
 """)
@@ -1115,46 +1418,53 @@ took.</p>
     rows = []
     for run in charted or runs:
         rate = stats[run["id"]]["cost_rate"]
-        label = run.get("label") or run.get("model")
+        reports_cost = stats[run["id"]]["reports_cost"]
         for t, rec in sorted(covered[run["id"]],
-                             key=lambda tr: (tr[1]["status"] != "PASS", tr[0]["id"])):
+                             key=lambda tr: (outcome(tr[1]) != "PASS", tr[0]["id"])):
             tools = rec.get("tools") or {}
-            status = rec["status"]
+            out = outcome(rec)
             cost, est = cost_bound(rec, rate)
-            cell = ("\u2264 " + fmt_usd(cost)) if est else fmt_usd(cost)
-            cls = "solved" if status == "PASS" else "open"
+            cell = ((("\u2264 " + fmt_usd(cost)) if est else fmt_usd(cost))
+                    if reports_cost else "n/r")
+            tokens = rec.get("tokens")
             keywords = " ".join([t["name"], t["title"], t["area"], t["group"],
-                                 label]).lower()
+                                 label[run["id"]]]).lower()
             rows.append(
                 f'<tr data-k="{esc(keywords)}" data-area="{t["area"]}" '
-                f'data-status="{status}" onclick="location=\'problems/{t["name"]}.html\'">'
+                f'data-status="{out}" data-model="{esc(run["id"])}" '
+                f'onclick="location=\'problems/{t["name"]}.html\'">'
                 f'<td class=ttl><a href="problems/{t["name"]}.html">{esc(t["title"])}</a></td>'
-                + (f'<td>{esc(label)}</td>' if multi else '')
+                + (f'<td>{esc(label[run["id"]])}</td>' if multi else '')
                 + f'<td>{badge(t["area"], "area-" + t["area"])}</td>'
                 f'<td class=grp>{esc(t["group"])}</td>'
-                f'<td><span class="status {cls}">'
-                f'{esc(OUTCOME_LABEL.get(status, status))}</span></td>'
+                f'<td>{outcome_pill(rec)}</td>'
                 f'<td class=numv>{esc(fmt_dur(rec.get("elapsed_s")))}</td>'
                 f'<td class=numv>{cell}</td>'
-                f'<td class=numv>{rec.get("turns") or DASH}</td>'
+                f'<td class=numv>{fmt_count(tokens["out"] if tokens else None)}</td>'
+                f'<td class=numv>{rec.get("tool_calls") or DASH}</td>'
                 f'<td class=numv>{tools.get("compile", 0) if tools else DASH}</td>'
                 f'<td class=numv>{tools.get("check", 0) if tools else DASH}</td></tr>')
 
-    controls = """
+    model_opts = "".join(f'<option value="{esc(r["id"])}">{esc(label[r["id"]])}</option>'
+                         for r in (charted or runs))
+    present = {outcome(rec) for r in (charted or runs)
+               for _, rec in covered[r["id"]]}
+    status_opts = "".join(f'<option value={k}>{esc(lbl)}</option>'
+                          for k, lbl, _ in OUTCOMES if k in present)
+    controls = f"""
 <div class=controls>
-  <input id=search type=search placeholder="Search tasks" autocomplete=off>
+  <input class=search type=search data-for=problems placeholder="Search tasks" autocomplete=off>
   <div class=selects>
-    <select id=areasel aria-label="Filter by area">
+    {f'<select data-for=problems data-attr=model aria-label="Filter by model"><option value=all>All models</option>{model_opts}</select>' if multi else ''}
+    <select data-for=problems data-attr=area aria-label="Filter by area">
       <option value=all>All areas</option>
       <option value=eBPF>eBPF</option>
       <option value=LLVM>LLVM</option>
       <option value=seL4>seL4</option>
     </select>
-    <select id=statussel aria-label="Filter by outcome">
+    <select data-for=problems data-attr=status aria-label="Filter by outcome">
       <option value=all>All outcomes</option>
-      <option value=PASS>Solved</option>
-      <option value=FAIL>Failed</option>
-      <option value=TIMEOUT>Timed out</option>
+      {status_opts}
     </select>
   </div>
 </div>
@@ -1166,37 +1476,29 @@ took.</p>
 <p>Every run here is scored the same way: one attempt per task, no human help,
 a fixed wall-clock cap, and a solution counts only when <code>check.sh</code>
 passes every gate &mdash; hash integrity, no stubs, no cheats, a clean Lean
-build, and no added axioms. Cost and time are what the run itself reported.</p>
+build, and no added axioms &mdash; and the blind LLM review does not reject
+it. Cost and time are what the run itself reported.</p>
 
-<div class=tablewrap>
-<table class=results>
-<thead><tr><th>Model</th><th>Date</th><th>Tasks</th><th>Solved</th>
-<th>Average time</th><th>Average cost</th><th>Cost recorded</th>
-<th>Cost incl. killed runs</th></tr></thead>
-<tbody>{run_rows}</tbody>
-</table>
-</div>
-<p class=hint>A run killed at the cap writes no final cost record. Dropping
-those would understate what a model spent, since the longest runs are the ones
-that get killed, so the last column bounds each of them by its wall clock at
-the highest cost rate that same run reached.{partial_hint}</p>
-
+{comparison}
+{by_group}
+{matrix}
 {''.join(sections)}
 
 <h2>Every run</h2>
 <p class=hint>Compiles and checks are the agent's own loop: how many times it
-built the file, and how many times it submitted to <code>check.sh</code>. Open
-a task to see its activity profile.</p>
+built the file, and how many times it submitted to <code>check.sh</code>.
+Output tokens include reasoning; n/r marks a cost the harness did not report.
+Open a task to see its activity profile.</p>
 {controls}
 <div class=tablewrap>
-<table class=problems id=problems>
+<table class="problems filterable" id=problems>
 <thead><tr><th>Task</th>{'<th>Model</th>' if multi else ''}<th>Area</th>
-<th>Group</th><th>Outcome</th><th>Time</th><th>Cost</th><th>Turns</th>
-<th>Compiles</th><th>Checks</th></tr></thead>
+<th>Group</th><th>Outcome</th><th>Time</th><th>Cost</th><th>Output tokens</th>
+<th>Tool calls</th><th>Compiles</th><th>Checks</th></tr></thead>
 <tbody>{''.join(rows)}</tbody>
 </table>
 </div>
-<p class=empty id=empty hidden>No tasks match.</p>
+<p class=empty data-for=problems hidden>No tasks match.</p>
 </section>
 """
     return page("Vero: Results", body, 0, repo_url, "results")
@@ -1249,12 +1551,17 @@ def render_problem(t, runs, repo_url):
 </section>
 """
     elif t["status"] == "solved":
-        who = model_label(t["runs"][0][0].get("model"), runs)
+        who = [run.get("label") or run.get("model") for run, rec in t["runs"]
+               if outcome(rec) == "PASS"]
+        names = (" and ".join(who) if len(who) < 3
+                 else ", ".join(who[:-1]) + ", and " + who[-1])
+        many = len(who) > 1
         solution = f"""
 <section id=solutions>
 <h2>Solution</h2>
-<p class=open-note>{esc(who)} solved this task in the run below. The solution
-is under review and is not published yet.</p>
+<p class=open-note>{esc(names)} solved this task in the run{'s' if many else ''}
+below. The solution{'s are' if many else ' is'} under review and
+{'are' if many else 'is'} not published yet.</p>
 </section>
 """
     else:
@@ -1273,9 +1580,9 @@ is under review and is not published yet.</p>
     agent_runs = f"""
 <section id=runs>
 <h2>Agent run{'s' if len(t["runs"]) > 1 else ''}</h2>
-<p class=hint>One attempt, no human help. The profile counts the agent's tool
-calls over the run: what it read, edited, compiled, and submitted to
-<code>check.sh</code>.</p>
+<p class=hint>One attempt per model, no human help. The profile counts the
+agent's tool calls over the run: what it read, edited, compiled, and submitted
+to <code>check.sh</code>.</p>
 {cards}
 </section>
 """ if t["runs"] else ""
@@ -1340,12 +1647,13 @@ def load_tasks(runs):
                 "note": read(sol_dir / "agent_note.md"),
             }
         task_runs = runs_for(d.name, runs)
-        passed = any(rec.get("status") == "PASS" for _, rec in task_runs)
+        passed = any(outcome(rec) == "PASS" for _, rec in task_runs)
         tasks.append({
             "name": d.name, "area": area, "title": ttl,
             "runs": task_runs,
             # Published means the Lean solution is on the page; solved means
-            # a run passed check.sh but the solution is still under review.
+            # a run solved it (check.sh and the LLM review) but the solution
+            # is still under review.
             "status": "published" if solution else
                       ("solved" if passed else "open"),
             "group": group_of(d.name, content),
@@ -1508,7 +1816,7 @@ ul.authors .badge { margin-right: 8px; }
 
 .controls { display: flex; align-items: center; justify-content: space-between;
   margin: 18px 0 12px; flex-wrap: wrap; }
-#search { padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px;
+.search { padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px;
   font-size: 14px; width: 260px; max-width: 100%; }
 .selects { display: flex; flex-wrap: wrap; }
 .selects select { margin-left: 10px; padding: 7px 10px; border: 1px solid #ccc;
@@ -1535,10 +1843,11 @@ td.grp { color: #666; }
 .badge.cx { background: #f6f2fb; border-color: #e2d5f2; color: #6b3fa0; }
 
 .status { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px;
-  border-radius: 999px; }
+  border-radius: 999px; white-space: nowrap; }
 .status.open { background: #f2f2f2; color: #888; }
 .status.solved { background: #e7f6ea; color: #1f7a37; }
 .status.published { background: #1f7a37; color: #fff; }
+.status.rejected { background: #faf0dc; color: #8a5a00; }
 
 .crumb { color: #888; font-size: 13px; margin: 18px 0 4px; }
 .probhead h1 { font-size: 25px; margin: 4px 0 10px; line-height: 1.25;
@@ -1660,6 +1969,8 @@ table.results { width: 100%; border-collapse: collapse; font-size: 14px; margin:
   text-transform: uppercase; letter-spacing: .4px; border-bottom: 1px solid #e6e6e6;
   padding: 8px 10px; }
 .results td { border-bottom: 1px solid #f0f0f0; padding: 9px 10px; }
+.results tr.total td { border-top: 1px solid #e6e6e6; font-weight: 600; }
+.results td .badge { white-space: nowrap; }
 
 .trademark { color: #999; font-size: 12px; margin-top: 28px; }
 .prose code { background: #f4f4f6; padding: 1px 5px; border-radius: 4px;
@@ -1678,46 +1989,53 @@ footer { border-top: 1px solid #eee; color: #999; font-size: 13px;
 }
 """
 
-APP_JS = """// Progressive enhancement: client-side search and area filter on the index.
+APP_JS = """// Progressive enhancement: client-side search and filters for every
+// table.filterable. Its controls name it in data-for; each select filters the
+// rows on the data-<data-attr> attribute.
 (function () {
-  var search = document.getElementById('search');
-  var table = document.getElementById('problems');
-  if (!table) return;
-  var rows = [].slice.call(table.tBodies[0].rows);
-  var empty = document.getElementById('empty');
-  var area = 'all', status = 'all', q = '';
+  function wire(table) {
+    var id = table.id;
+    var rows = [].slice.call(table.tBodies[0].rows);
+    var search = document.querySelector('input[data-for="' + id + '"]');
+    var empty = document.querySelector('.empty[data-for="' + id + '"]');
+    var sels = [].slice.call(document.querySelectorAll('select[data-for="' + id + '"]'));
+    var q = '';
 
-  function apply() {
-    var shown = 0;
-    for (var i = 0; i < rows.length; i++) {
-      var r = rows[i];
-      var okA = area === 'all' || r.getAttribute('data-area') === area;
-      // "solved" covers published solutions too; "published" is the subset.
-      var rs = r.getAttribute('data-status');
-      var okS = status === 'all' || rs === status ||
-                (status === 'solved' && rs === 'published');
-      var okQ = !q || r.getAttribute('data-k').indexOf(q) !== -1;
-      var vis = okA && okS && okQ;
-      r.style.display = vis ? '' : 'none';
-      if (vis) shown++;
+    function apply() {
+      var shown = 0;
+      for (var i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        var vis = !q || r.getAttribute('data-k').indexOf(q) !== -1;
+        for (var j = 0; vis && j < sels.length; j++) {
+          var v = sels[j].value;
+          var rv = r.getAttribute('data-' + sels[j].getAttribute('data-attr'));
+          // "solved" covers published solutions too; "published" is the subset.
+          vis = v === 'all' || rv === v || (v === 'solved' && rv === 'published');
+        }
+        r.style.display = vis ? '' : 'none';
+        if (vis) shown++;
+      }
+      if (empty) empty.hidden = shown !== 0;
     }
-    if (empty) empty.hidden = shown !== 0;
+    if (search) search.addEventListener('input', function () {
+      q = this.value.trim().toLowerCase(); apply();
+    });
+    var preset = false;
+    for (var j = 0; j < sels.length; j++) {
+      sels[j].addEventListener('change', apply);
+      // Preset from the query string (?area=eBPF, ?status=solved): the About
+      // page's area cards and stat tiles link here.
+      var m = location.search.match(
+        new RegExp('[?&]' + sels[j].getAttribute('data-attr') + '=([A-Za-z0-9_.-]+)'));
+      if (m) {
+        sels[j].value = m[1];
+        if (sels[j].value === m[1]) preset = true; else sels[j].value = 'all';
+      }
+    }
+    if (preset) apply();
   }
-  if (search) search.addEventListener('input', function () {
-    q = this.value.trim().toLowerCase(); apply();
-  });
-  var areasel = document.getElementById('areasel');
-  var statussel = document.getElementById('statussel');
-  if (areasel) areasel.addEventListener('change', function () { area = this.value; apply(); });
-  if (statussel) statussel.addEventListener('change', function () { status = this.value; apply(); });
-
-  // Preset the filters from the query string: the About page's area cards
-  // and stat tiles link here.
-  var m = location.search.match(/[?&]area=(eBPF|LLVM|seL4)/);
-  if (m && areasel) { area = m[1]; areasel.value = area; }
-  var ms = location.search.match(/[?&]status=(published|solved|open|PASS|FAIL|TIMEOUT)/);
-  if (ms && statussel) { status = ms[1]; statussel.value = status; }
-  if (m || ms) apply();
+  var tables = document.querySelectorAll('table.filterable');
+  for (var i = 0; i < tables.length; i++) wire(tables[i]);
 })();
 """
 
